@@ -40,27 +40,61 @@ jobs:
           BASE=${{ github.base_ref }}
           CHANGED=$(git diff --name-only origin/$BASE...HEAD)
 
-          # Source files: anything under a src/ directory (.js .ts .svelte .rs)
-          # Excludes *.config.* and build.rs (infrastructure, not logic)
-          CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.(js|ts|svelte|rs)$' \
-            | grep -vE '(\.config\.|build\.rs)' \
+          # ── JS/TS source files (src/, excluding config and test files) ──
+          JS_CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.(js|ts|svelte)$' \
+            | grep -vE '(\.config\.|\.d\.ts$)' \
             | grep -vE '\.(test|spec)\.(js|ts)$' || true)
 
-          # Test files
-          TESTS=$(echo "$CHANGED" | grep -E '\.(test|spec)\.(js|ts)$' || true)
+          # JS/TS test files
+          JS_TESTS=$(echo "$CHANGED" | grep -E '\.(test|spec)\.(js|ts)$' || true)
 
-          if [ -n "$CODE" ] && [ -z "$TESTS" ]; then
-            echo "❌ Source changes detected without test files."
+          # ── Rust source files (src/*.rs, excluding build.rs) ──
+          RS_CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.rs$' \
+            | grep -vE 'build\.rs$' || true)
+
+          # Rust test files: integration tests in tests/ directories
+          RS_INT_TESTS=$(echo "$CHANGED" | grep -E '^.*/tests/.*\.rs$' || true)
+
+          # Rust inline tests: changed .rs source files that contain #[cfg(test)]
+          RS_INLINE_TESTS=""
+          if [ -n "$RS_CODE" ]; then
+            while IFS= read -r f; do
+              if grep -q '#\[cfg(test)\]' "$f" 2>/dev/null; then
+                RS_INLINE_TESTS="$RS_INLINE_TESTS $f"
+              fi
+            done <<< "$RS_CODE"
+          fi
+
+          RS_TESTS=$(printf '%s\n%s' "$RS_INT_TESTS" "$RS_INLINE_TESTS" | grep -v '^$' || true)
+
+          # ── Evaluate ──
+          FAIL=0
+
+          if [ -n "$JS_CODE" ] && [ -z "$JS_TESTS" ]; then
+            echo "❌ JS/TS source changes detected without test files."
             echo ""
             echo "Changed source files:"
-            echo "$CODE" | sed 's/^/  /'
+            echo "$JS_CODE" | sed 's/^/  /'
+            FAIL=1
+          fi
+
+          if [ -n "$RS_CODE" ] && [ -z "$RS_TESTS" ]; then
+            echo "❌ Rust source changes detected without tests."
+            echo "   Add #[cfg(test)] inline tests or files under tests/."
+            echo ""
+            echo "Changed source files:"
+            echo "$RS_CODE" | sed 's/^/  /'
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
             echo ""
             echo "Add tests for your changes, or if this change is genuinely untestable,"
             echo "add a note to the PR description explaining why."
             exit 1
           fi
 
-          if [ -n "$CODE" ]; then
+          if [ -n "$JS_CODE" ] || [ -n "$RS_CODE" ]; then
             echo "✓ Tests included alongside source changes."
           else
             echo "✓ No source changes — test check skipped."
