@@ -18,7 +18,7 @@ pub fn run() {
     let migrations = vec![Migration {
         version: 1,
         description: "initial schema",
-        sql: include_str!("../../../../packages/db/migrations/001_initial.sql"),
+        sql: db::MIGRATION_001,
         kind: MigrationKind::Up,
     }];
 
