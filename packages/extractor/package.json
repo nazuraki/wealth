@@ -1,0 +1,17 @@
+{
+  "name": "@wealth/extractor",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "extractor": "src/index.js"
+  },
+  "scripts": {
+    "extract": "node src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "dotenv": "^17.4.2",
+    "pdf-parse": "^1.1.1"
+  }
+}

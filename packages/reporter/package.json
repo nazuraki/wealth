@@ -1,0 +1,12 @@
+{
+  "name": "@wealth/reporter",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "reporter": "src/index.js"
+  },
+  "dependencies": {
+    "@wealth/db": "*"
+  }
+}
