@@ -40,8 +40,9 @@ jobs:
           BASE=${{ github.base_ref }}
           CHANGED=$(git diff --name-only origin/$BASE...HEAD)
 
-          # ── JS/TS source files (src/, excluding config and test files) ──
-          JS_CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.(js|ts|svelte)$' \
+          # ── JS/TS source files (src/, excluding config, test, and Svelte files) ──
+          # .svelte files are UI markup; tested manually or via E2E, not unit test files
+          JS_CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.(js|ts)$' \
             | grep -vE '(\.config\.|\.d\.ts$)' \
             | grep -vE '\.(test|spec)\.(js|ts)$' || true)
 
