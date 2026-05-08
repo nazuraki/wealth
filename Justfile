@@ -16,8 +16,12 @@ dev:
 build:
     cd apps/desktop && npm run tauri build
 
-# Run all checks (typecheck)
-check: typecheck
+# Run all checks (typecheck + test)
+check: typecheck test
+
+# Run tests
+test:
+    npx vitest run
 
 # Type-check all packages
 typecheck:
