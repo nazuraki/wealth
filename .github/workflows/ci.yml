@@ -16,6 +16,10 @@ jobs:
           node-version: 20
           cache: npm
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - uses: extractions/setup-just@v2
 
       - run: npm install
