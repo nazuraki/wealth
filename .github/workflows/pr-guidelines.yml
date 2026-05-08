@@ -1,0 +1,67 @@
+name: PR Guidelines
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  title:
+    name: Conventional commit title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            build
+            chore
+            ci
+            docs
+            feat
+            fix
+            perf
+            refactor
+            revert
+            style
+            test
+          requireScope: false
+
+  tests-with-code:
+    name: Tests included with code changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for tests alongside source changes
+        run: |
+          BASE=${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/$BASE...HEAD)
+
+          # Source files: anything under a src/ directory (.js .ts .svelte .rs)
+          # Excludes *.config.* and build.rs (infrastructure, not logic)
+          CODE=$(echo "$CHANGED" | grep -E '^.*/src/.*\.(js|ts|svelte|rs)$' \
+            | grep -vE '(\.config\.|build\.rs)' \
+            | grep -vE '\.(test|spec)\.(js|ts)$' || true)
+
+          # Test files
+          TESTS=$(echo "$CHANGED" | grep -E '\.(test|spec)\.(js|ts)$' || true)
+
+          if [ -n "$CODE" ] && [ -z "$TESTS" ]; then
+            echo "❌ Source changes detected without test files."
+            echo ""
+            echo "Changed source files:"
+            echo "$CODE" | sed 's/^/  /'
+            echo ""
+            echo "Add tests for your changes, or if this change is genuinely untestable,"
+            echo "add a note to the PR description explaining why."
+            exit 1
+          fi
+
+          if [ -n "$CODE" ]; then
+            echo "✓ Tests included alongside source changes."
+          else
+            echo "✓ No source changes — test check skipped."
+          fi
