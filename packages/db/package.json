@@ -9,6 +9,6 @@
     "./migrations": "./migrations"
   },
   "devDependencies": {
-    "@wealth/test-utils": "*"
+    "better-sqlite3": "*"
   }
 }

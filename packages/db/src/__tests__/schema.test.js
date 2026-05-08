@@ -2,12 +2,24 @@ import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync, readdirSync } from "fs";
 import { resolve, join } from "path";
 import { fileURLToPath } from "url";
-import { createTestDb } from "@wealth/test-utils";
+import Database from "better-sqlite3";
 
 const migrationsDir = resolve(
   fileURLToPath(import.meta.url),
   "../../../migrations"
 );
+
+function createTestDb() {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  const files = readdirSync(migrationsDir)
+    .filter((f) => f.endsWith(".sql"))
+    .sort();
+  for (const file of files) {
+    db.exec(readFileSync(join(migrationsDir, file), "utf8"));
+  }
+  return { db, teardown: () => db.close() };
+}
 
 describe("DB schema", () => {
   let teardown;

@@ -5,8 +5,6 @@ export default defineConfig({
     environment: "node",
     globals: true,
     projects: [
-      "packages/test-utils/vitest.config.js",
-      "packages/extractor/vitest.config.js",
       "packages/db/vitest.config.js",
       "packages/reporter/vitest.config.js",
     ],

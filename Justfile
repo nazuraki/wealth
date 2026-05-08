@@ -17,11 +17,15 @@ build:
     cd apps/desktop && npm run tauri build
 
 # Run all checks (typecheck + test)
-check: typecheck test
+check: typecheck test cargo-test
 
 # Run tests
 test:
     npx vitest run
+
+# Run Rust tests
+cargo-test:
+    cargo test --workspace
 
 # Type-check all packages
 typecheck:
