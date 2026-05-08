@@ -2,20 +2,19 @@ import "dotenv/config";
 import Anthropic from "@anthropic-ai/sdk";
 import fs from "fs";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 
 // pdf-parse is CommonJS; bridge it via createRequire
 const require = createRequire(import.meta.url);
 const pdfParse = require("pdf-parse");
 
-const client = new Anthropic();
-
-async function extractText(pdfPath) {
+export async function extractText(pdfPath) {
   const buffer = fs.readFileSync(pdfPath);
   const data = await pdfParse(buffer);
   return data.text;
 }
 
-async function parseLineItems(rawText, label) {
+export async function parseLineItems(rawText, label, client) {
   const response = await client.messages.create({
     model: "claude-opus-4-7",
     max_tokens: 4096,
@@ -95,8 +94,8 @@ async function parseLineItems(rawText, label) {
 async function main() {
   const args = process.argv.slice(2);
   if (args.length === 0) {
-    console.error("Usage: node extract-statement.js <path-to-pdf> [label]");
-    console.error("Example: node extract-statement.js chase_dec_2024.pdf");
+    console.error("Usage: node index.js <path-to-pdf> [label]");
+    console.error("Example: node index.js chase_dec_2024.pdf");
     process.exit(1);
   }
 
@@ -108,11 +107,13 @@ async function main() {
     process.exit(1);
   }
 
+  const client = new Anthropic();
+
   console.error(`Extracting text from ${pdfPath}...`);
   const rawText = await extractText(pdfPath);
 
   console.error(`Parsing ${rawText.length} characters with Claude...`);
-  const result = await parseLineItems(rawText, label);
+  const result = await parseLineItems(rawText, label, client);
 
   // Print structured JSON to stdout so it can be piped
   console.log(JSON.stringify(result, null, 2));
@@ -127,7 +128,9 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(err.message);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
+}
