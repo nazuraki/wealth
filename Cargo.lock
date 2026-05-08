@@ -871,6 +871,7 @@ dependencies = [
  "anyhow",
  "db",
  "extractor",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
