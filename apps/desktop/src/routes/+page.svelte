@@ -3,7 +3,27 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
 
-  type Status = "idle" | "loading" | "success" | "error";
+  interface AccountBalance {
+    institution: string;
+    account_number_last4: string;
+    closing_balance: number | null;
+    statement_period: string;
+  }
+
+  interface RecentImport {
+    institution: string;
+    account_number_last4: string;
+    statement_period: string;
+    transaction_count: number;
+    imported_at: string;
+  }
+
+  interface DashboardData {
+    spend_30d: number;
+    spend_90d: number;
+    account_balances: AccountBalance[];
+    recent_imports: RecentImport[];
+  }
 
   interface ImportSummary {
     institution: string;
@@ -12,21 +32,29 @@
     transaction_count: number;
   }
 
-  interface Transaction {
-    date: string;
-    description: string;
-    category: string;
-    amount: number;
-    type: "debit" | "credit";
+  type PageState = "initializing" | "empty" | "dashboard" | "importing" | "import-error";
+
+  let pageState = $state<PageState>("initializing");
+  let dashboard = $state<DashboardData | null>(null);
+  let lastImport = $state<ImportSummary | null>(null);
+  let importError = $state("");
+  let dragging = $state(false);
+  let importBanner = $state(false);
+
+  async function loadDashboard() {
+    try {
+      const data = await invoke<DashboardData | null>("get_dashboard");
+      dashboard = data;
+      pageState = data ? "dashboard" : "empty";
+    } catch {
+      dashboard = null;
+      pageState = "empty";
+    }
   }
 
-  let status = $state<Status>("idle");
-  let summary = $state<ImportSummary | null>(null);
-  let transactions = $state<Transaction[]>([]);
-  let errorMessage = $state("");
-  let dragging = $state(false);
-
   onMount(() => {
+    loadDashboard();
+
     const win = getCurrentWindow();
     const unlistenPromise = win.onDragDropEvent((event) => {
       if (event.payload.type === "enter") {
@@ -38,9 +66,8 @@
         const paths: string[] = event.payload.paths;
         const pdf = paths.find((p) => p.toLowerCase().endsWith(".pdf"));
         if (!pdf) {
-          status = "error";
-          errorMessage =
-            "Only PDF files are supported. Please drop a bank or credit card statement PDF.";
+          importError = "Only PDF files are supported. Please drop a bank or credit card statement PDF.";
+          pageState = "import-error";
           return;
         }
         runImport(pdf);
@@ -65,51 +92,62 @@
   function onDrop(e: DragEvent) {
     e.preventDefault();
     dragging = false;
-    // Real file paths come from the Tauri DragDrop event above.
-    // This handler catches non-PDF drops in the browser environment.
     const file = e.dataTransfer?.files[0];
     if (file && !file.name.toLowerCase().endsWith(".pdf")) {
-      status = "error";
-      errorMessage =
-        "Only PDF files are supported. Please drop a bank or credit card statement PDF.";
+      importError = "Only PDF files are supported. Please drop a bank or credit card statement PDF.";
+      pageState = "import-error";
     }
   }
 
   async function runImport(path: string) {
-    status = "loading";
-    errorMessage = "";
+    pageState = "importing";
+    importError = "";
     try {
-      summary = await invoke<ImportSummary>("import_statement", { path });
-      transactions = [];
-      status = "success";
+      lastImport = await invoke<ImportSummary>("import_statement", { path });
+      await loadDashboard();
+      importBanner = true;
+      setTimeout(() => (importBanner = false), 4000);
     } catch (e) {
-      errorMessage = String(e);
-      status = "error";
+      importError = String(e);
+      pageState = "import-error";
     }
   }
 
-  function reset() {
-    status = "idle";
-    summary = null;
-    transactions = [];
-    errorMessage = "";
-    dragging = false;
+  function dismissError() {
+    pageState = dashboard ? "dashboard" : "empty";
+    importError = "";
+  }
+
+  function fmt(n: number) {
+    return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+  }
+
+  function fmtDate(iso: string) {
+    return iso.replace("T", " ").slice(0, 16);
   }
 </script>
 
-<main class="container">
-  {#if status === "idle" || status === "loading"}
+<main
+  class="container"
+  class:dragging-overlay={dragging && pageState === "dashboard"}
+  ondragover={onDragOver}
+  ondragleave={onDragLeave}
+  ondrop={onDrop}
+  role="region"
+  aria-label="Wealth dashboard"
+>
+  {#if pageState === "initializing"}
+    <div class="center-frame">
+      <div class="spinner" aria-label="Loading…"></div>
+    </div>
+
+  {:else if pageState === "empty" || (pageState === "importing" && !dashboard)}
     <div
       class="drop-zone"
       class:dragging
-      class:loading={status === "loading"}
-      ondragover={onDragOver}
-      ondragleave={onDragLeave}
-      ondrop={onDrop}
-      role="region"
-      aria-label="Drop zone for PDF statements"
+      class:loading={pageState === "importing"}
     >
-      {#if status === "loading"}
+      {#if pageState === "importing"}
         <div class="spinner" aria-label="Importing…"></div>
         <p class="hint">Extracting transactions…</p>
       {:else}
@@ -123,59 +161,92 @@
         <p class="hint">Bank and credit card statements supported</p>
       {/if}
     </div>
-  {:else if status === "error"}
-    <div class="state-card error-card">
-      <svg class="icon error-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="10" />
-        <line x1="12" y1="8" x2="12" y2="12" />
-        <line x1="12" y1="16" x2="12.01" y2="16" />
-      </svg>
-      <p class="headline">Import failed</p>
-      <p class="hint">{errorMessage}</p>
-      <button onclick={reset}>Try again</button>
-    </div>
-  {:else if status === "success" && summary}
-    <div class="success-header">
-      <svg class="icon success-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-        <polyline points="22 4 12 14.01 9 11.01" />
-      </svg>
-      <div class="summary-text">
-        <p class="headline">
-          {summary.institution} ···{summary.account_number_last4}
-        </p>
-        <p class="hint">
-          {summary.statement_period} · {summary.transaction_count} transactions imported
-        </p>
+
+  {:else if pageState === "import-error"}
+    <div class="center-frame">
+      <div class="state-card error-card">
+        <svg class="icon error-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" />
+          <line x1="12" y1="8" x2="12" y2="12" />
+          <line x1="12" y1="16" x2="12.01" y2="16" />
+        </svg>
+        <p class="headline">Import failed</p>
+        <p class="hint">{importError}</p>
+        <button onclick={dismissError}>Go back</button>
       </div>
-      <button class="secondary" onclick={reset}>Import another</button>
     </div>
 
-    {#if transactions.length > 0}
-      <table class="tx-table">
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Description</th>
-            <th>Category</th>
-            <th class="amount-col">Amount</th>
-            <th>Type</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each transactions as tx}
-            <tr>
-              <td>{tx.date}</td>
-              <td>{tx.description}</td>
-              <td>{tx.category}</td>
-              <td class="amount-col">${tx.amount.toFixed(2)}</td>
-              <td class:debit={tx.type === "debit"} class:credit={tx.type === "credit"}
-                >{tx.type}</td
-              >
-            </tr>
-          {/each}
-        </tbody>
-      </table>
+  {:else if pageState === "dashboard" || pageState === "importing"}
+    {#if importBanner && lastImport}
+      <div class="import-banner">
+        <svg class="icon-sm success-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+          <polyline points="22 4 12 14.01 9 11.01" />
+        </svg>
+        Imported {lastImport.transaction_count} transactions from {lastImport.institution} ···{lastImport.account_number_last4}
+      </div>
+    {/if}
+
+    <header class="page-header">
+      <h1 class="page-title">Dashboard</h1>
+      <p class="page-hint">Drop a PDF anywhere to import a statement</p>
+    </header>
+
+    {#if pageState === "importing"}
+      <div class="import-overlay">
+        <div class="spinner" aria-label="Importing…"></div>
+        <p class="hint">Extracting transactions…</p>
+      </div>
+    {/if}
+
+    {#if dashboard}
+      <section class="cards-row" aria-label="Spending summary">
+        <div class="card">
+          <p class="card-label">Last 30 days</p>
+          <p class="card-value">{fmt(dashboard.spend_30d)}</p>
+          <p class="card-sub">debit spend</p>
+        </div>
+        <div class="card">
+          <p class="card-label">Last 90 days</p>
+          <p class="card-value">{fmt(dashboard.spend_90d)}</p>
+          <p class="card-sub">debit spend</p>
+        </div>
+        {#each dashboard.account_balances as acct}
+          <div class="card">
+            <p class="card-label">{acct.institution} ···{acct.account_number_last4}</p>
+            <p class="card-value">{acct.closing_balance != null ? fmt(acct.closing_balance) : "–"}</p>
+            <p class="card-sub">closing balance · {acct.statement_period}</p>
+          </div>
+        {/each}
+      </section>
+
+      <section class="recent-section" aria-label="Recent imports">
+        <h2 class="section-title">Recent Imports</h2>
+        {#if dashboard.recent_imports.length === 0}
+          <p class="hint">No imports yet.</p>
+        {:else}
+          <table class="imports-table">
+            <thead>
+              <tr>
+                <th>Account</th>
+                <th>Period</th>
+                <th class="num-col">Transactions</th>
+                <th>Imported</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each dashboard.recent_imports as imp}
+                <tr>
+                  <td>{imp.institution} ···{imp.account_number_last4}</td>
+                  <td>{imp.statement_period}</td>
+                  <td class="num-col">{imp.transaction_count}</td>
+                  <td>{fmtDate(imp.imported_at)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      </section>
     {/if}
   {/if}
 </main>
@@ -205,9 +276,34 @@
     align-items: center;
     padding: 2rem;
     box-sizing: border-box;
+    position: relative;
   }
 
-  /* ── Drop zone ── */
+  .container.dragging-overlay::after {
+    content: "Drop PDF to import";
+    position: fixed;
+    inset: 0;
+    background: rgba(57, 108, 216, 0.12);
+    border: 3px dashed #396cd8;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.4rem;
+    font-weight: 600;
+    color: #396cd8;
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  .center-frame {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+  }
+
   .drop-zone {
     width: 100%;
     max-width: 560px;
@@ -233,7 +329,19 @@
     cursor: wait;
   }
 
-  /* ── Spinner ── */
+  .import-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;
+    z-index: 50;
+    color: #fff;
+  }
+
   .spinner {
     width: 40px;
     height: 40px;
@@ -244,16 +352,12 @@
   }
 
   @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    to { transform: rotate(360deg); }
   }
 
-  /* ── State cards ── */
   .state-card {
     width: 100%;
     max-width: 560px;
-    margin-top: 10vh;
     border-radius: 12px;
     padding: 2.5rem 2rem;
     display: flex;
@@ -267,21 +371,141 @@
     background: rgba(229, 62, 62, 0.05);
   }
 
-  /* ── Success header ── */
-  .success-header {
+  .import-banner {
     width: 100%;
-    max-width: 800px;
+    max-width: 900px;
+    background: rgba(56, 161, 105, 0.12);
+    border: 1px solid #38a169;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
     display: flex;
     align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+    color: #276749;
+    margin-bottom: 1rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .import-banner { color: #68d391; }
+  }
+
+  .page-header {
+    width: 100%;
+    max-width: 900px;
+    margin-bottom: 1.5rem;
+  }
+
+  .page-title {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 0.2rem;
+  }
+
+  .page-hint {
+    font-size: 0.85rem;
+    color: #888;
+    margin: 0;
+  }
+
+  .cards-row {
+    width: 100%;
+    max-width: 900px;
+    display: flex;
+    flex-wrap: wrap;
     gap: 1rem;
-    padding: 1rem 0 1.5rem;
+    margin-bottom: 2rem;
   }
 
-  .summary-text {
-    flex: 1;
+  .card {
+    flex: 1 1 180px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 1.1rem 1.25rem;
   }
 
-  /* ── Typography ── */
+  @media (prefers-color-scheme: dark) {
+    .card {
+      background: #2d2d2d;
+      border-color: #3a3a3a;
+    }
+  }
+
+  .card-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    margin: 0 0 0.35rem;
+  }
+
+  .card-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    margin: 0 0 0.2rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card-sub {
+    font-size: 0.78rem;
+    color: #888;
+    margin: 0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .card-label, .card-sub { color: #aaa; }
+  }
+
+  .recent-section {
+    width: 100%;
+    max-width: 900px;
+  }
+
+  .section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.75rem;
+  }
+
+  .imports-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  .imports-table th,
+  .imports-table td {
+    padding: 0.55rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid #e2e8f0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .imports-table th,
+    .imports-table td {
+      border-bottom-color: #2d3748;
+    }
+  }
+
+  .imports-table th {
+    font-weight: 600;
+    color: #555;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .imports-table th { color: #aaa; }
+  }
+
+  .num-col {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
   .headline {
     font-size: 1.1rem;
     font-weight: 600;
@@ -295,12 +519,9 @@
   }
 
   @media (prefers-color-scheme: dark) {
-    .hint {
-      color: #aaa;
-    }
+    .hint { color: #aaa; }
   }
 
-  /* ── Icons ── */
   .icon {
     width: 48px;
     height: 48px;
@@ -312,20 +533,20 @@
     opacity: 0.5;
   }
 
-  .error-icon {
-    color: #e53e3e;
-    opacity: 1;
-  }
-
-  .success-icon {
-    color: #38a169;
-    opacity: 1;
-    width: 36px;
-    height: 36px;
+  .icon-sm {
+    width: 18px;
+    height: 18px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
     flex-shrink: 0;
   }
 
-  /* ── Buttons ── */
+  .error-icon { color: #e53e3e; opacity: 1; }
+  .success-icon { color: #38a169; opacity: 1; }
+
   button {
     border-radius: 8px;
     border: 1px solid transparent;
@@ -338,60 +559,5 @@
     transition: background 0.2s;
   }
 
-  button:hover {
-    background-color: #2d5bc7;
-  }
-
-  button.secondary {
-    background-color: transparent;
-    border-color: #396cd8;
-    color: #396cd8;
-  }
-
-  button.secondary:hover {
-    background-color: rgba(57, 108, 216, 0.08);
-  }
-
-  /* ── Transaction table ── */
-  .tx-table {
-    width: 100%;
-    max-width: 800px;
-    border-collapse: collapse;
-    font-size: 0.9rem;
-  }
-
-  .tx-table th,
-  .tx-table td {
-    padding: 0.6rem 0.75rem;
-    text-align: left;
-    border-bottom: 1px solid #e2e8f0;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .tx-table th,
-    .tx-table td {
-      border-bottom-color: #2d3748;
-    }
-  }
-
-  .tx-table th {
-    font-weight: 600;
-    color: #555;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
-  .amount-col {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .debit {
-    color: #e53e3e;
-  }
-
-  .credit {
-    color: #38a169;
-  }
+  button:hover { background-color: #2d5bc7; }
 </style>
