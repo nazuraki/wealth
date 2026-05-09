@@ -85,7 +85,9 @@ pub(crate) fn write_to_db(db_path: &Path, source_file: &str, result: &Extraction
 
 fn do_import(app: &AppHandle, path: &str) -> Result<ImportSummary> {
     let pdf_path = PathBuf::from(path);
-    let db_path = app.path().app_data_dir()?.join("wealth.db");
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    let db_path = data_dir.join("wealth.db");
     let client = AnthropicClient::from_env()?;
     let text = extract_text(&pdf_path)?;
     let label = pdf_path
