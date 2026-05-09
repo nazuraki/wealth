@@ -106,7 +106,9 @@ fn query_dashboard(conn: &Connection) -> Result<Option<DashboardData>> {
 }
 
 fn do_get_dashboard(app: &AppHandle) -> Result<Option<DashboardData>> {
-    let db_path = app.path().app_data_dir()?.join("wealth.db");
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    let db_path = data_dir.join("wealth.db");
     let conn = Connection::open(&db_path)?;
     conn.execute_batch(db::MIGRATION_001)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;

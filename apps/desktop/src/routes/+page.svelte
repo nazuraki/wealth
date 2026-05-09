@@ -42,9 +42,14 @@
   let importBanner = $state(false);
 
   async function loadDashboard() {
-    const data = await invoke<DashboardData | null>("get_dashboard");
-    dashboard = data;
-    pageState = data ? "dashboard" : "empty";
+    try {
+      const data = await invoke<DashboardData | null>("get_dashboard");
+      dashboard = data;
+      pageState = data ? "dashboard" : "empty";
+    } catch {
+      dashboard = null;
+      pageState = "empty";
+    }
   }
 
   onMount(() => {
