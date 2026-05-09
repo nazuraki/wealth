@@ -75,15 +75,23 @@ pub fn parse_line_items(text: &str, label: &str, client: &dyn ClaudeClient) -> R
 
 pub struct AnthropicClient {
     api_key: String,
+    base_url: String,
     http: reqwest::blocking::Client,
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String) -> Self {
+    pub const DEFAULT_ENDPOINT: &'static str = "https://api.anthropic.com/v1/messages";
+
+    pub fn with_config(api_key: String, base_url: String) -> Self {
         Self {
             api_key,
+            base_url,
             http: reqwest::blocking::Client::new(),
         }
+    }
+
+    pub fn new(api_key: String) -> Self {
+        Self::with_config(api_key, Self::DEFAULT_ENDPOINT.to_string())
     }
 
     pub fn from_env() -> Result<Self> {
@@ -194,7 +202,7 @@ If a field cannot be determined from the text, use null for nullable fields or a
 
         let resp = self
             .http
-            .post("https://api.anthropic.com/v1/messages")
+            .post(&self.base_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
