@@ -761,7 +761,7 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 0.75rem 0;
+    padding: 0.75rem 0 1rem;
     gap: 0.25rem;
     background: #ebebeb;
     border-right: 1px solid #ddd;
