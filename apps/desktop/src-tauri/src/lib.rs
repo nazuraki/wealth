@@ -1,3 +1,4 @@
+mod dashboard;
 mod importer;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
@@ -18,7 +19,10 @@ pub fn run() {
                 .add_migrations("sqlite:wealth.db", migrations)
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![importer::import_statement])
+        .invoke_handler(tauri::generate_handler![
+            importer::import_statement,
+            dashboard::get_dashboard,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
