@@ -765,7 +765,7 @@
     gap: 0.25rem;
     background: #ebebeb;
     border-right: 1px solid #ddd;
-    height: 100%;
+
   }
 
   @media (prefers-color-scheme: dark) {
