@@ -722,7 +722,8 @@
   /* ── Layout ── */
 
   .app-shell {
-    min-height: 100vh;
+    height: 100vh;
+    overflow: hidden;
     display: flex;
     flex-direction: row;
     position: relative;
@@ -758,9 +759,7 @@
     gap: 0.25rem;
     background: #ebebeb;
     border-right: 1px solid #ddd;
-    position: sticky;
-    top: 0;
-    height: 100vh;
+    height: 100%;
   }
 
   @media (prefers-color-scheme: dark) {
@@ -816,7 +815,7 @@
 
   .content {
     flex: 1;
-    min-height: 100vh;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
