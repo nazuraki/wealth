@@ -702,6 +702,12 @@
 </div>
 
 <style>
+  :global(html), :global(body) {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+
   :root {
     font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
     font-size: 16px;
