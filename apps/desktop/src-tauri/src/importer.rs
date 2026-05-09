@@ -130,7 +130,19 @@ fn do_import(app: &AppHandle, path: &str) -> Result<Vec<ImportSummary>> {
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("wealth.db");
-    let client = AnthropicClient::from_env()?;
+
+    let s = crate::settings::load(&data_dir);
+    let api_key = s
+        .api_key
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        .ok_or_else(|| anyhow::anyhow!("No API key configured. Set one in Settings or set the ANTHROPIC_API_KEY environment variable."))?;
+    let base_url = s
+        .endpoint_url
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| AnthropicClient::DEFAULT_ENDPOINT.to_string());
+    let client = AnthropicClient::with_config(api_key, base_url);
+
     let text = extract_text(&pdf_path)?;
     let label = pdf_path
         .file_name()
