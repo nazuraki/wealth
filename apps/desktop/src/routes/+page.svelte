@@ -93,6 +93,18 @@
   let importBanner = $state(false);
   let chartWidth = $state(600);
 
+  let chartFrom = $state("");
+  let chartTo = $state("");
+  let availablePeriods = $state<string[]>([]);
+
+  $effect(() => {
+    if (chartFrom && chartTo) {
+      invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
+        .then(data => { chartData = data; })
+        .catch(() => {});
+    }
+  });
+
   let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
   let settingsSaved = $state(false);
   let settingsSaving = $state(false);
@@ -101,13 +113,24 @@
 
   async function loadDashboard() {
     try {
-      const [data, chart] = await Promise.all([
+      const [data, periods] = await Promise.all([
         invoke<DashboardData | null>("get_dashboard"),
-        invoke<ChartData | null>("get_chart_data"),
+        invoke<string[]>("get_available_periods"),
       ]);
       dashboard = data;
-      chartData = chart;
       pageState = data ? "dashboard" : "empty";
+      availablePeriods = periods;
+      if (periods.length > 0) {
+        const prevTo = chartTo;
+        chartTo = periods[periods.length - 1];
+        chartFrom = periods.length >= 12 ? periods[periods.length - 12] : periods[0];
+        // If selection didn't change, the $effect won't re-fire — force a reload.
+        if (chartTo === prevTo && chartFrom) {
+          invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
+            .then(data => { chartData = data; })
+            .catch(() => {});
+        }
+      }
     } catch {
       dashboard = null;
       chartData = null;
@@ -247,25 +270,36 @@
       : FALLBACK_COLORS[index % FALLBACK_COLORS.length];
   }
 
-  function last12Months(): string[] {
+  function monthsBetween(from: string, to: string): string[] {
+    const [fy, fm] = from.split("-").map(Number);
+    const [ty, tm] = to.split("-").map(Number);
     const months: string[] = [];
-    const now = new Date();
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      months.push(
-        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
-      );
+    let y = fy, m = fm;
+    while (y < ty || (y === ty && m <= tm)) {
+      months.push(`${y}-${String(m).padStart(2, "0")}`);
+      m++;
+      if (m > 12) { m = 1; y++; }
     }
     return months;
   }
 
-  function monthLabel(period: string): string {
-    const [y, m] = period.split("-");
-    const abbr = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-    return `${abbr[parseInt(m) - 1]} '${y.slice(2)}`;
+  const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  function xMonthName(period: string): string {
+    return MONTH_ABBR[parseInt(period.split("-")[1]) - 1];
   }
 
-  const CHART_PAD = { top: 16, right: 16, bottom: 36, left: 64 };
+  function xMonthYear(period: string): string {
+    return `'${period.slice(2, 4)}`;
+  }
+
+  function fmtY(n: number): string {
+    if (n === 0) return "$0";
+    const sign = n < 0 ? "-" : "";
+    return `${sign}$${(Math.abs(n) / 1000).toFixed(0)}k`;
+  }
+
+  const CHART_PAD = { top: 16, right: 16, bottom: 48, left: 52 };
   const CHART_H = 220;
 
   interface ChartGeometry {
@@ -275,11 +309,12 @@
     minVal: number;
     maxVal: number;
     yTicks: number[];
+    zeroY: number | null;
     seriesPolylines: { color: string; points: string; dots: { cx: number; cy: number }[] }[];
   }
 
-  function buildChart(cd: ChartData, totalW: number): ChartGeometry {
-    const months = last12Months();
+  function buildChart(cd: ChartData, totalW: number, from: string, to: string): ChartGeometry {
+    const months = monthsBetween(from, to);
     const plotW = totalW - CHART_PAD.left - CHART_PAD.right;
     const plotH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
 
@@ -291,18 +326,30 @@
       }
     }
 
-    let minVal = allVals.length ? Math.min(...allVals) : 0;
-    let maxVal = allVals.length ? Math.max(...allVals) : 1000;
-    if (minVal === maxVal) { minVal -= 500; maxVal += 500; }
-    // Pad 10% on each side.
+    const dataMin = allVals.length ? Math.min(...allVals) : 0;
+    let minVal = dataMin;
+    let maxVal = allVals.length ? Math.max(...allVals) : 5000;
+    if (minVal === maxVal) { minVal -= 2500; maxVal += 2500; }
     const range = maxVal - minVal;
     minVal = minVal - range * 0.08;
     maxVal = maxVal + range * 0.08;
 
-    // Nice y-ticks (5 steps).
-    const yTicks = Array.from({ length: 5 }, (_, i) =>
-      minVal + ((maxVal - minVal) * i) / 4
-    );
+    // Pick a step that is a multiple of $5k and yields ~5 ticks.
+    const NICE_STEPS = [5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000];
+    const step = NICE_STEPS.find(s => (maxVal - minVal) / s <= 6) ?? 1000000;
+    minVal = Math.floor(minVal / step) * step;
+    maxVal = Math.ceil(maxVal / step) * step;
+    if (minVal === maxVal) maxVal += step;
+
+    // Don't render below $0 if no data goes negative.
+    if (dataMin >= 0) minVal = Math.max(0, minVal);
+
+    const yTicks: number[] = [];
+    for (let v = minVal; v <= maxVal; v += step) yTicks.push(v);
+
+    const zeroY = minVal <= 0 && maxVal >= 0
+      ? plotH - ((0 - minVal) / (maxVal - minVal)) * plotH
+      : null;
 
     function xOf(period: string): number {
       const idx = months.indexOf(period);
@@ -328,7 +375,7 @@
       return { color: seriesColor(s, i), points: ptStr, dots };
     });
 
-    return { months, plotW, plotH, minVal, maxVal, yTicks, seriesPolylines };
+    return { months, plotW, plotH, minVal, maxVal, yTicks, zeroY, seriesPolylines };
   }
 
   // ── Summary card computations ─────────────────────────────────────────────────
@@ -470,16 +517,6 @@
         </div>
       </div>
     {:else if pageState === "dashboard" || pageState === "importing"}
-      {#if importBanner && lastImport}
-        <div class="import-banner">
-          <svg class="icon-sm success-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-            <polyline points="22 4 12 14.01 9 11.01" />
-          </svg>
-          {importBannerText(lastImport)}
-        </div>
-      {/if}
-
       {#if pageState === "importing"}
         <div class="import-overlay">
           <div class="spinner" aria-label="Importing…"></div>
@@ -490,11 +527,26 @@
       {#if dashboard}
         {#if activeView === "dashboard"}
           <!-- 12-month balance chart -->
-          {#if chartData && chartData.account_series.length > 0}
-            {@const geo = buildChart(chartData, chartWidth)}
+          {#if chartData && chartData.account_series.length > 0 && chartFrom && chartTo}
+            {@const geo = buildChart(chartData, chartWidth, chartFrom, chartTo)}
             {@const cards = summaryCards(chartData)}
-            <section class="chart-section" aria-label="12-month balance history">
-              <h2 class="section-title">Balance History</h2>
+            <section class="chart-section" aria-label="Balance history">
+              <div class="chart-header">
+                <h2 class="section-title">Balance History</h2>
+                <div class="chart-range">
+                  <select class="period-select" bind:value={chartFrom}>
+                    {#each availablePeriods.toReversed() as p}
+                      <option value={p}>{xMonthName(p)} '{p.slice(2, 4)}</option>
+                    {/each}
+                  </select>
+                  <span class="range-sep">—</span>
+                  <select class="period-select" bind:value={chartTo}>
+                    {#each availablePeriods.toReversed() as p}
+                      <option value={p}>{xMonthName(p)} '{p.slice(2, 4)}</option>
+                    {/each}
+                  </select>
+                </div>
+              </div>
               <div
                 class="chart-wrap"
                 bind:clientWidth={chartWidth}
@@ -514,18 +566,26 @@
                         x2={geo.plotW} y2={y}
                         class="grid-line"
                       />
-                      <text x="-8" y={y} class="axis-label y-label">{fmt(tick)}</text>
+                      <text x="-6" y={y} class="axis-label y-label">{fmtY(tick)}</text>
                     {/each}
 
-                    <!-- X axis labels -->
+                    <!-- $0 reference line -->
+                    {#if geo.zeroY !== null}
+                      <line
+                        x1="0" y1={geo.zeroY}
+                        x2={geo.plotW} y2={geo.zeroY}
+                        class="zero-line"
+                      />
+                    {/if}
+
+                    <!-- X axis labels (month / year stacked) -->
                     {#each geo.months as m, i}
                       {@const x = geo.months.length === 1 ? geo.plotW / 2 : (i / (geo.months.length - 1)) * geo.plotW}
                       <text
                         x={x}
-                        y={geo.plotH + 24}
+                        y={geo.plotH + 16}
                         class="axis-label x-label"
-                        class:x-label-show={i % 2 === 0 || i === geo.months.length - 1}
-                      >{monthLabel(m)}</text>
+                      >{xMonthName(m)}<tspan x={x} dy="12">{xMonthYear(m)}</tspan></text>
                     {/each}
 
                     <!-- Series lines -->
@@ -699,6 +759,16 @@
       </section>
     {/if}
   </main>
+
+  {#if importBanner && lastImport}
+    <div class="import-toast">
+      <svg class="icon-sm success-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+        <polyline points="22 4 12 14.01 9 11.01" />
+      </svg>
+      {importBannerText(lastImport)}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -914,9 +984,11 @@
     background: rgba(229, 62, 62, 0.05);
   }
 
-  .import-banner {
-    width: 100%;
-    max-width: 900px;
+  .import-toast {
+    position: fixed;
+    bottom: 1.5rem;
+    right: 1.5rem;
+    max-width: 360px;
     background: rgba(56, 161, 105, 0.12);
     border: 1px solid #38a169;
     border-radius: 8px;
@@ -926,11 +998,22 @@
     gap: 0.5rem;
     font-size: 0.9rem;
     color: #276749;
-    margin-bottom: 1rem;
+    z-index: 200;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    animation: toast-in 0.25s ease-out;
+  }
+
+  @keyframes toast-in {
+    from { transform: translateX(120%); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
   }
 
   @media (prefers-color-scheme: dark) {
-    .import-banner { color: #68d391; }
+    .import-toast {
+      background: rgba(56, 161, 105, 0.15);
+      color: #68d391;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
   }
 
   .cards-row {
@@ -994,6 +1077,55 @@
 
   /* ── Chart ── */
 
+  .chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+
+  .chart-header .section-title {
+    margin-bottom: 0;
+  }
+
+  .chart-range {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .period-select {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: #555;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #ccc;
+    padding: 0.1rem 0.2rem;
+    cursor: pointer;
+    outline: none;
+  }
+
+  .period-select:focus {
+    border-bottom-color: #396cd8;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .period-select {
+      color: #aaa;
+      border-bottom-color: #444;
+    }
+    .period-select:focus {
+      border-bottom-color: #396cd8;
+    }
+  }
+
+  .range-sep {
+    font-size: 0.78rem;
+    color: #aaa;
+  }
+
   .chart-section {
     width: 100%;
     max-width: 900px;
@@ -1011,8 +1143,14 @@
     stroke-width: 1;
   }
 
+  .zero-line {
+    stroke: #94a3b8;
+    stroke-width: 1;
+  }
+
   @media (prefers-color-scheme: dark) {
     .grid-line { stroke: #2d3748; }
+    .zero-line { stroke: #4a5568; }
   }
 
   .axis-label {
@@ -1028,11 +1166,6 @@
 
   .x-label {
     text-anchor: middle;
-    display: none;
-  }
-
-  .x-label-show {
-    display: block;
   }
 
   /* ── Legend ── */
