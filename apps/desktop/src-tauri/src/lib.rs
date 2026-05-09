@@ -1,6 +1,7 @@
 mod chart;
 mod dashboard;
 mod importer;
+mod settings;
 
 use tauri_plugin_sql::{Migration, MigrationKind};
 
@@ -32,6 +33,8 @@ pub fn run() {
             importer::import_statement,
             dashboard::get_dashboard,
             chart::get_chart_data,
+            settings::get_settings,
+            settings::save_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

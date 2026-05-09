@@ -28,3 +28,6 @@ db = { path = "../../../crates/db" }
 anyhow = "1"
 rusqlite = "0.32"
 
+[dev-dependencies]
+tempfile = "3"
+
