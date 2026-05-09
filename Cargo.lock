@@ -929,6 +929,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-opener",
  "tauri-plugin-sql",
+ "tempfile",
 ]
 
 [[package]]
