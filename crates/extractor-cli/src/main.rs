@@ -28,16 +28,17 @@ fn main() -> Result<()> {
     // JSON to stdout so it can be piped; summary to stderr
     println!("{}", serde_json::to_string_pretty(&result)?);
 
-    let s = &result.summary;
-    let a = &result.account;
-    eprintln!(
-        "\n✓ {} {}\n  {} transactions | Debits: ${:.2} | Credits: ${:.2}",
-        a.institution,
-        a.statement_period,
-        s.transaction_count,
-        s.total_debits,
-        s.total_credits
-    );
+    for ae in &result.accounts {
+        eprintln!(
+            "\n✓ {} ···{} {}\n  {} transactions | Debits: ${:.2} | Credits: ${:.2}",
+            ae.account.institution,
+            ae.account.account_number_last4,
+            ae.account.statement_period,
+            ae.summary.transaction_count,
+            ae.summary.total_debits,
+            ae.summary.total_credits
+        );
+    }
 
     Ok(())
 }

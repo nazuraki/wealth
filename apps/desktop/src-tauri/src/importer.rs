@@ -1,5 +1,8 @@
 use anyhow::Result;
-use extractor::{extract_text, parse_line_items, AnthropicClient, ExtractionResult, TransactionType};
+use extractor::{
+    extract_text, parse_line_items, AccountExtraction, AnthropicClient, ExtractionResult,
+    TransactionType,
+};
 use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -15,17 +18,29 @@ pub struct ImportSummary {
 
 // ── DB write (testable inner fn) ──────────────────────────────────────────────
 
-fn write_to_tx(tx: &Transaction<'_>, source_file: &str, result: &ExtractionResult) -> Result<ImportSummary> {
-    let acct = &result.account;
+fn write_account_to_tx(
+    tx: &Transaction<'_>,
+    source_file: &str,
+    extraction: &AccountExtraction,
+) -> Result<ImportSummary> {
+    let acct = &extraction.account;
 
+    // Accounts are keyed on last4 only — institution name variants of the same card map to one record.
     tx.execute(
-        "INSERT OR IGNORE INTO accounts (institution, account_number_last4) VALUES (?1, ?2)",
-        params![acct.institution, acct.account_number_last4],
+        "INSERT INTO accounts (institution, account_number_last4, account_type) \
+         SELECT ?1, ?2, ?3 WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE account_number_last4 = ?2)",
+        params![acct.institution, acct.account_number_last4, acct.account_type],
     )?;
+    if acct.account_type.is_some() {
+        tx.execute(
+            "UPDATE accounts SET account_type = ?1 WHERE account_number_last4 = ?2 AND account_type IS NULL",
+            params![acct.account_type, acct.account_number_last4],
+        )?;
+    }
 
     let account_id: i64 = tx.query_row(
-        "SELECT id FROM accounts WHERE institution = ?1 AND account_number_last4 = ?2",
-        params![acct.institution, acct.account_number_last4],
+        "SELECT id FROM accounts WHERE account_number_last4 = ?1",
+        params![acct.account_number_last4],
         |row| row.get(0),
     )?;
 
@@ -54,12 +69,19 @@ fn write_to_tx(tx: &Transaction<'_>, source_file: &str, result: &ExtractionResul
             "INSERT INTO transactions (statement_id, date, description, category, amount, type) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for t in &result.transactions {
+        for t in &extraction.transactions {
             let kind = match t.transaction_type {
                 TransactionType::Debit => "debit",
                 TransactionType::Credit => "credit",
             };
-            stmt.execute(params![statement_id, t.date, t.description, t.category, t.amount, kind])?;
+            stmt.execute(params![
+                statement_id,
+                t.date,
+                t.description,
+                t.category,
+                t.amount,
+                kind
+            ])?;
         }
     }
 
@@ -67,23 +89,43 @@ fn write_to_tx(tx: &Transaction<'_>, source_file: &str, result: &ExtractionResul
         institution: acct.institution.clone(),
         account_number_last4: acct.account_number_last4.clone(),
         statement_period: acct.statement_period.clone(),
-        transaction_count: if statement_inserted { result.transactions.len() } else { 0 },
+        transaction_count: if statement_inserted {
+            extraction.transactions.len()
+        } else {
+            0
+        },
     })
 }
 
-pub(crate) fn write_to_db(db_path: &Path, source_file: &str, result: &ExtractionResult) -> Result<ImportSummary> {
+fn write_to_tx(
+    tx: &Transaction<'_>,
+    source_file: &str,
+    result: &ExtractionResult,
+) -> Result<Vec<ImportSummary>> {
+    result
+        .accounts
+        .iter()
+        .map(|a| write_account_to_tx(tx, source_file, a))
+        .collect()
+}
+
+pub(crate) fn write_to_db(
+    db_path: &Path,
+    source_file: &str,
+    result: &ExtractionResult,
+) -> Result<Vec<ImportSummary>> {
     let mut conn = Connection::open(db_path)?;
-    conn.execute_batch(db::MIGRATION_001)?;
+    db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     let tx = conn.transaction()?;
-    let summary = write_to_tx(&tx, source_file, result)?;
+    let summaries = write_to_tx(&tx, source_file, result)?;
     tx.commit()?;
-    Ok(summary)
+    Ok(summaries)
 }
 
 // ── Tauri command ─────────────────────────────────────────────────────────────
 
-fn do_import(app: &AppHandle, path: &str) -> Result<ImportSummary> {
+fn do_import(app: &AppHandle, path: &str) -> Result<Vec<ImportSummary>> {
     let pdf_path = PathBuf::from(path);
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
@@ -99,7 +141,7 @@ fn do_import(app: &AppHandle, path: &str) -> Result<ImportSummary> {
 }
 
 #[tauri::command]
-pub async fn import_statement(app: AppHandle, path: String) -> Result<ImportSummary, String> {
+pub async fn import_statement(app: AppHandle, path: String) -> Result<Vec<ImportSummary>, String> {
     tauri::async_runtime::spawn_blocking(move || do_import(&app, &path))
         .await
         .map_err(|e| e.to_string())?
@@ -111,57 +153,65 @@ pub async fn import_statement(app: AppHandle, path: String) -> Result<ImportSumm
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extractor::{Account, ExtractionResult, Summary, Transaction, TransactionType};
+    use extractor::{Account, AccountExtraction, ExtractionResult, Summary, Transaction, TransactionType};
 
     fn open_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(db::MIGRATION_001).unwrap();
+        db::run_migrations(&conn).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
     }
 
-    fn fixture() -> ExtractionResult {
+    fn make_extraction(last4: &str, period: &str, account_type: &str) -> ExtractionResult {
         ExtractionResult {
-            account: Account {
-                institution: "First National Bank".into(),
-                account_number_last4: "4242".into(),
-                statement_period: "2024-12".into(),
-                opening_balance: Some(1000.0),
-                closing_balance: Some(850.5),
-            },
-            transactions: vec![
-                Transaction {
-                    date: "2024-12-01".into(),
-                    description: "WHOLE FOODS MARKET".into(),
-                    category: "Groceries".into(),
-                    amount: 87.32,
-                    transaction_type: TransactionType::Debit,
+            accounts: vec![AccountExtraction {
+                account: Account {
+                    institution: "First National Bank".into(),
+                    account_number_last4: last4.into(),
+                    account_type: Some(account_type.into()),
+                    statement_period: period.into(),
+                    opening_balance: Some(1000.0),
+                    closing_balance: Some(850.5),
                 },
-                Transaction {
-                    date: "2024-12-03".into(),
-                    description: "DIRECT DEPOSIT".into(),
-                    category: "Income".into(),
-                    amount: 2500.0,
-                    transaction_type: TransactionType::Credit,
+                transactions: vec![
+                    Transaction {
+                        date: "2024-12-01".into(),
+                        description: "WHOLE FOODS MARKET".into(),
+                        category: "Groceries".into(),
+                        amount: 87.32,
+                        transaction_type: TransactionType::Debit,
+                    },
+                    Transaction {
+                        date: "2024-12-03".into(),
+                        description: "DIRECT DEPOSIT".into(),
+                        category: "Income".into(),
+                        amount: 2500.0,
+                        transaction_type: TransactionType::Credit,
+                    },
+                ],
+                summary: Summary {
+                    total_debits: 87.32,
+                    total_credits: 2500.0,
+                    transaction_count: 2,
                 },
-            ],
-            summary: Summary {
-                total_debits: 87.32,
-                total_credits: 2500.0,
-                transaction_count: 2,
-            },
+            }],
         }
+    }
+
+    fn fixture() -> ExtractionResult {
+        make_extraction("4242", "2024-12", "checking")
     }
 
     #[test]
     fn write_inserts_account_statement_transactions() {
         let mut conn = open_test_db();
         let tx = conn.transaction().unwrap();
-        let summary = write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
+        let summaries = write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
         tx.commit().unwrap();
 
-        assert_eq!(summary.institution, "First National Bank");
-        assert_eq!(summary.transaction_count, 2);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].institution, "First National Bank");
+        assert_eq!(summaries[0].transaction_count, 2);
 
         let tx_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
@@ -170,15 +220,67 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_account_is_not_duplicated() {
+    fn multi_account_pdf_inserts_all_accounts() {
+        let result = ExtractionResult {
+            accounts: vec![
+                make_extraction("4242", "2024-12", "checking").accounts.remove(0),
+                make_extraction("9999", "2024-12", "savings").accounts.remove(0),
+            ],
+        };
+
+        let mut conn = open_test_db();
+        let tx = conn.transaction().unwrap();
+        let summaries = write_to_tx(&tx, "combined.pdf", &result).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(summaries.len(), 2);
+
+        let acct_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(acct_count, 2);
+
+        let tx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tx_count, 4);
+    }
+
+    #[test]
+    fn same_last4_different_institution_maps_to_one_account() {
         let mut conn = open_test_db();
 
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture()).unwrap();
+        tx.commit().unwrap();
+
+        let mut variant = fixture();
+        variant.accounts[0].account.institution = "First National Bank (Visa)".into();
+        variant.accounts[0].account.statement_period = "2025-01".into();
+
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "jan.pdf", &variant).unwrap();
+        tx.commit().unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let stmt_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM statements", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stmt_count, 2);
+    }
+
+    #[test]
+    fn duplicate_account_is_not_duplicated() {
+        let mut conn = open_test_db();
         for _ in 0..2 {
             let tx = conn.transaction().unwrap();
             write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
             tx.commit().unwrap();
         }
-
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
             .unwrap();
@@ -188,19 +290,15 @@ mod tests {
     #[test]
     fn duplicate_statement_skips_transactions() {
         let mut conn = open_test_db();
-
         for _ in 0..2 {
             let tx = conn.transaction().unwrap();
             write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
             tx.commit().unwrap();
         }
-
-        // transactions inserted only once
         let tx_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tx_count, 2);
-
         let stmt_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM statements", [], |r| r.get(0))
             .unwrap();
@@ -215,14 +313,12 @@ mod tests {
         write_to_tx(&tx, "dec.pdf", &fixture()).unwrap();
         tx.commit().unwrap();
 
-        let mut jan = fixture();
-        jan.account.statement_period = "2025-01".into();
-
+        let jan = make_extraction("4242", "2025-01", "checking");
         let tx = conn.transaction().unwrap();
-        let summary = write_to_tx(&tx, "jan.pdf", &jan).unwrap();
+        let summaries = write_to_tx(&tx, "jan.pdf", &jan).unwrap();
         tx.commit().unwrap();
 
-        assert_eq!(summary.transaction_count, 2);
+        assert_eq!(summaries[0].transaction_count, 2);
 
         let stmt_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM statements", [], |r| r.get(0))
