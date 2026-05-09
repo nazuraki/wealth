@@ -14,6 +14,8 @@ pub struct AccountSeries {
     pub institution: String,
     pub account_number_last4: String,
     pub account_type: Option<String>,
+    pub display_name: Option<String>,
+    pub color: Option<String>,
     pub points: Vec<BalancePoint>,
 }
 
@@ -51,17 +53,17 @@ fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<Ch
     }
 
     let mut acct_stmt = conn.prepare(
-        "SELECT id, institution, account_number_last4, account_type \
+        "SELECT id, institution, account_number_last4, account_type, display_name, color \
          FROM accounts \
          ORDER BY institution, account_number_last4",
     )?;
-    let accounts: Vec<(i64, String, String, Option<String>)> = acct_stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+    let accounts: Vec<(i64, String, String, Option<String>, Option<String>, Option<String>)> = acct_stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
         .filter_map(|r| r.ok())
         .collect();
 
     let mut account_series = Vec::new();
-    for (account_id, institution, last4, account_type) in accounts {
+    for (account_id, institution, last4, account_type, display_name, color) in accounts {
         let mut pt_stmt = conn.prepare(
             "SELECT statement_period, closing_balance \
              FROM statements \
@@ -84,6 +86,8 @@ fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<Ch
                 institution,
                 account_number_last4: last4,
                 account_type,
+                display_name,
+                color,
                 points,
             });
         }

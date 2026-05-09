@@ -2,6 +2,18 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import {
+    Chart,
+    LineController,
+    LineElement,
+    PointElement,
+    LinearScale,
+    CategoryScale,
+    Tooltip,
+    Legend,
+  } from "chart.js";
+
+  Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Tooltip, Legend);
 
   // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -53,6 +65,8 @@
     institution: string;
     account_number_last4: string;
     account_type: string | null;
+    display_name: string | null;
+    color: string | null;
     points: BalancePoint[];
   }
 
@@ -67,6 +81,17 @@
     monthly_flows: MonthlyFlow[];
   }
 
+  interface Account {
+    id: number;
+    institution: string;
+    account_number_last4: string;
+    account_type: string | null;
+    display_name: string | null;
+    color: string | null;
+    closing_balance: number | null;
+    statement_period: string | null;
+  }
+
   type PageState =
     | "initializing"
     | "empty"
@@ -76,12 +101,12 @@
 
   type ActiveView = "dashboard" | "accounts" | "transactions" | "imports" | "settings";
 
-  // ── State ─────────────────────────────────────────────────────────────────────
-
   interface AppSettings {
     api_key: string | null;
     endpoint_url: string | null;
   }
+
+  // ── State ─────────────────────────────────────────────────────────────────────
 
   let pageState = $state<PageState>("initializing");
   let activeView = $state<ActiveView>("dashboard");
@@ -91,11 +116,28 @@
   let importError = $state("");
   let dragging = $state(false);
   let importBanner = $state(false);
-  let chartWidth = $state(600);
 
   let chartFrom = $state("");
   let chartTo = $state("");
   let availablePeriods = $state<string[]>([]);
+
+  let accounts = $state<Account[]>([]);
+  let editingAccountId = $state<number | null>(null);
+  let editingName = $state("");
+
+  function focusOnMount(node: HTMLElement) {
+    node.focus();
+    if (node instanceof HTMLInputElement) node.select();
+  }
+
+  let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
+  let settingsSaved = $state(false);
+  let settingsSaving = $state(false);
+
+  // ── Chart canvas / instance ───────────────────────────────────────────────────
+
+  let canvasEl = $state<HTMLCanvasElement | null>(null);
+  let chartInstance: Chart | null = null;
 
   $effect(() => {
     if (chartFrom && chartTo) {
@@ -105,9 +147,90 @@
     }
   });
 
-  let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
-  let settingsSaved = $state(false);
-  let settingsSaving = $state(false);
+  $effect(() => {
+    if (!canvasEl || !chartData) return;
+
+    const months = chartData
+      ? monthsBetween(chartFrom, chartTo)
+      : [];
+
+    const datasets = chartData.account_series.map((s, i) => {
+      const color = s.color ?? seriesColorFallback(s, i);
+      const data = months.map(m => {
+        const pt = s.points.find(p => p.period === m);
+        return pt?.closing_balance ?? null;
+      });
+      return {
+        label: accountLabel(s),
+        data,
+        borderColor: color,
+        backgroundColor: color,
+        pointBackgroundColor: color,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        tension: 0,
+        spanGaps: false,
+      };
+    });
+
+    if (chartInstance) {
+      chartInstance.data.labels = months.map(xMonthLabel);
+      chartInstance.data.datasets = datasets;
+      chartInstance.update();
+    } else {
+      chartInstance = new Chart(canvasEl, {
+        type: "line",
+        data: { labels: months.map(xMonthLabel), datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: {
+              position: "bottom",
+              labels: { boxWidth: 12, padding: 16, font: { size: 12 } },
+              onClick(e, item, legend) {
+                // Default Chart.js toggle behavior
+                const ci = legend.chart;
+                const meta = ci.getDatasetMeta(item.datasetIndex!);
+                meta.hidden = !meta.hidden;
+                ci.update();
+              },
+            },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  if (ctx.parsed.y == null) return "";
+                  return `${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { color: "rgba(0,0,0,0.06)" },
+              ticks: { font: { size: 11 } },
+            },
+            y: {
+              grid: { color: "rgba(0,0,0,0.06)" },
+              ticks: {
+                font: { size: 11 },
+                callback: (v) => fmtY(v as number),
+              },
+            },
+          },
+        },
+      });
+    }
+  });
+
+  // Destroy chart when leaving dashboard view or when component unmounts
+  $effect(() => {
+    if (activeView !== "dashboard" && chartInstance) {
+      chartInstance.destroy();
+      chartInstance = null;
+    }
+  });
 
   // ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -124,7 +247,6 @@
         const prevTo = chartTo;
         chartTo = periods[periods.length - 1];
         chartFrom = periods.length >= 12 ? periods[periods.length - 12] : periods[0];
-        // If selection didn't change, the $effect won't re-fire — force a reload.
         if (chartTo === prevTo && chartFrom) {
           invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
             .then(data => { chartData = data; })
@@ -135,6 +257,14 @@
       dashboard = null;
       chartData = null;
       pageState = "empty";
+    }
+  }
+
+  async function loadAccounts() {
+    try {
+      accounts = await invoke<Account[]>("get_accounts");
+    } catch {
+      // non-fatal
     }
   }
 
@@ -188,8 +318,45 @@
     });
     return () => {
       unlistenPromise.then((f) => f());
+      chartInstance?.destroy();
     };
   });
+
+  // ── Accounts view ─────────────────────────────────────────────────────────────
+
+  function startEditName(acct: Account) {
+    editingAccountId = acct.id;
+    editingName = acct.display_name ?? acct.institution;
+  }
+
+  async function commitEditName(acct: Account) {
+    if (editingAccountId !== acct.id) return;
+    editingAccountId = null;
+    const newName = editingName.trim() || null;
+    if (newName === (acct.display_name ?? null) && newName === (acct.display_name)) return;
+    try {
+      await invoke("update_account", { id: acct.id, displayName: newName, color: acct.color });
+      acct.display_name = newName;
+      accounts = [...accounts];
+    } catch {
+      // revert
+      editingName = acct.display_name ?? acct.institution;
+    }
+  }
+
+  async function updateAccountColor(acct: Account, color: string) {
+    try {
+      await invoke("update_account", { id: acct.id, displayName: acct.display_name, color });
+      acct.color = color;
+      accounts = [...accounts];
+      // refresh chart data so line colors update
+      if (chartFrom && chartTo) {
+        chartData = await invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo });
+      }
+    } catch {
+      // non-fatal
+    }
+  }
 
   // ── Drag-drop ─────────────────────────────────────────────────────────────────
 
@@ -256,18 +423,17 @@
     savings: "#38a169",
   };
   const FALLBACK_COLORS = [
-    "#396cd8",
-    "#e05252",
-    "#38a169",
-    "#d69e2e",
-    "#805ad5",
-    "#319795",
+    "#396cd8", "#e05252", "#38a169", "#d69e2e", "#805ad5", "#319795",
   ];
 
-  function seriesColor(series: AccountSeries, index: number): string {
+  function seriesColorFallback(series: { account_type: string | null }, index: number): string {
     return series.account_type
       ? (TYPE_COLOR[series.account_type] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length])
       : FALLBACK_COLORS[index % FALLBACK_COLORS.length];
+  }
+
+  function accountLabel(s: AccountSeries): string {
+    return `${s.display_name ?? s.institution} ···${s.account_number_last4}`;
   }
 
   function monthsBetween(from: string, to: string): string[] {
@@ -285,97 +451,19 @@
 
   const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-  function xMonthName(period: string): string {
-    return MONTH_ABBR[parseInt(period.split("-")[1]) - 1];
+  function xMonthLabel(period: string): string {
+    const [y, m] = period.split("-");
+    return `${MONTH_ABBR[parseInt(m) - 1]} '${y.slice(2)}`;
   }
 
-  function xMonthYear(period: string): string {
-    return `'${period.slice(2, 4)}`;
+  function xMonthName(period: string): string {
+    return MONTH_ABBR[parseInt(period.split("-")[1]) - 1];
   }
 
   function fmtY(n: number): string {
     if (n === 0) return "$0";
     const sign = n < 0 ? "-" : "";
     return `${sign}$${(Math.abs(n) / 1000).toFixed(0)}k`;
-  }
-
-  const CHART_PAD = { top: 16, right: 16, bottom: 48, left: 52 };
-  const CHART_H = 220;
-
-  interface ChartGeometry {
-    months: string[];
-    plotW: number;
-    plotH: number;
-    minVal: number;
-    maxVal: number;
-    yTicks: number[];
-    zeroY: number | null;
-    seriesPolylines: { color: string; points: string; dots: { cx: number; cy: number }[] }[];
-  }
-
-  function buildChart(cd: ChartData, totalW: number, from: string, to: string): ChartGeometry {
-    const months = monthsBetween(from, to);
-    const plotW = totalW - CHART_PAD.left - CHART_PAD.right;
-    const plotH = CHART_H - CHART_PAD.top - CHART_PAD.bottom;
-
-    // Gather all balance values to set y scale.
-    const allVals: number[] = [];
-    for (const s of cd.account_series) {
-      for (const p of s.points) {
-        if (p.closing_balance != null) allVals.push(p.closing_balance);
-      }
-    }
-
-    const dataMin = allVals.length ? Math.min(...allVals) : 0;
-    let minVal = dataMin;
-    let maxVal = allVals.length ? Math.max(...allVals) : 5000;
-    if (minVal === maxVal) { minVal -= 2500; maxVal += 2500; }
-    const range = maxVal - minVal;
-    minVal = minVal - range * 0.08;
-    maxVal = maxVal + range * 0.08;
-
-    // Pick a step that is a multiple of $5k and yields ~5 ticks.
-    const NICE_STEPS = [5000, 10000, 25000, 50000, 100000, 250000, 500000, 1000000];
-    const step = NICE_STEPS.find(s => (maxVal - minVal) / s <= 6) ?? 1000000;
-    minVal = Math.floor(minVal / step) * step;
-    maxVal = Math.ceil(maxVal / step) * step;
-    if (minVal === maxVal) maxVal += step;
-
-    // Don't render below $0 if no data goes negative.
-    if (dataMin >= 0) minVal = Math.max(0, minVal);
-
-    const yTicks: number[] = [];
-    for (let v = minVal; v <= maxVal; v += step) yTicks.push(v);
-
-    const zeroY = minVal <= 0 && maxVal >= 0
-      ? plotH - ((0 - minVal) / (maxVal - minVal)) * plotH
-      : null;
-
-    function xOf(period: string): number {
-      const idx = months.indexOf(period);
-      if (idx < 0) return -1;
-      return months.length === 1 ? plotW / 2 : (idx / (months.length - 1)) * plotW;
-    }
-
-    function yOf(val: number): number {
-      return plotH - ((val - minVal) / (maxVal - minVal)) * plotH;
-    }
-
-    const seriesPolylines = cd.account_series.map((s, i) => {
-      const validPts = s.points.filter(
-        (p) => months.includes(p.period) && p.closing_balance != null
-      );
-      const ptStr = validPts
-        .map((p) => `${xOf(p.period).toFixed(1)},${yOf(p.closing_balance!).toFixed(1)}`)
-        .join(" ");
-      const dots = validPts.map((p) => ({
-        cx: xOf(p.period),
-        cy: yOf(p.closing_balance!),
-      }));
-      return { color: seriesColor(s, i), points: ptStr, dots };
-    });
-
-    return { months, plotW, plotH, minVal, maxVal, yTicks, zeroY, seriesPolylines };
   }
 
   // ── Summary card computations ─────────────────────────────────────────────────
@@ -412,6 +500,11 @@
     { id: "imports", label: "Import Log" },
     { id: "settings", label: "Settings" },
   ];
+
+  function handleNavClick(id: ActiveView) {
+    activeView = id;
+    if (id === "accounts") loadAccounts();
+  }
 </script>
 
 <div
@@ -430,7 +523,7 @@
         class="nav-btn"
         class:active={activeView === item.id}
         class:nav-bottom={item.id === "settings"}
-        onclick={() => (activeView = item.id)}
+        onclick={() => handleNavClick(item.id)}
         title={item.label}
         aria-label={item.label}
         aria-current={activeView === item.id ? "page" : undefined}
@@ -492,9 +585,7 @@
           <p class="hint">Extracting transactions…</p>
         {:else}
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
-            />
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
             <polyline points="14 2 14 8 20 8" />
             <line x1="12" y1="12" x2="12" y2="18" />
             <line x1="9" y1="15" x2="15" y2="15" />
@@ -526,9 +617,7 @@
 
       {#if dashboard}
         {#if activeView === "dashboard"}
-          <!-- 12-month balance chart -->
           {#if chartData && chartData.account_series.length > 0 && chartFrom && chartTo}
-            {@const geo = buildChart(chartData, chartWidth, chartFrom, chartTo)}
             {@const cards = summaryCards(chartData)}
             <section class="chart-section" aria-label="Balance history">
               <div class="chart-header">
@@ -547,104 +636,39 @@
                   </select>
                 </div>
               </div>
-              <div
-                class="chart-wrap"
-                bind:clientWidth={chartWidth}
-              >
-                <svg
-                  width={chartWidth}
-                  height={CHART_H}
-                  role="img"
-                  aria-label="Account balance chart"
-                >
-                  <g transform="translate({CHART_PAD.left},{CHART_PAD.top})">
-                    <!-- Y grid lines + labels -->
-                    {#each geo.yTicks as tick}
-                      {@const y = geo.plotH - ((tick - geo.minVal) / (geo.maxVal - geo.minVal)) * geo.plotH}
-                      <line
-                        x1="0" y1={y}
-                        x2={geo.plotW} y2={y}
-                        class="grid-line"
-                      />
-                      <text x="-6" y={y} class="axis-label y-label">{fmtY(tick)}</text>
-                    {/each}
-
-                    <!-- $0 reference line -->
-                    {#if geo.zeroY !== null}
-                      <line
-                        x1="0" y1={geo.zeroY}
-                        x2={geo.plotW} y2={geo.zeroY}
-                        class="zero-line"
-                      />
-                    {/if}
-
-                    <!-- X axis labels (month / year stacked) -->
-                    {#each geo.months as m, i}
-                      {@const x = geo.months.length === 1 ? geo.plotW / 2 : (i / (geo.months.length - 1)) * geo.plotW}
-                      <text
-                        x={x}
-                        y={geo.plotH + 16}
-                        class="axis-label x-label"
-                      >{xMonthName(m)}<tspan x={x} dy="12">{xMonthYear(m)}</tspan></text>
-                    {/each}
-
-                    <!-- Series lines -->
-                    {#each geo.seriesPolylines as s}
-                      {#if s.points}
-                        <polyline
-                          points={s.points}
-                          fill="none"
-                          stroke={s.color}
-                          stroke-width="2"
-                          stroke-linejoin="round"
-                          stroke-linecap="round"
-                        />
-                        {#each s.dots as d}
-                          <circle cx={d.cx} cy={d.cy} r="3.5" fill={s.color} />
-                        {/each}
-                      {/if}
-                    {/each}
-                  </g>
-                </svg>
-              </div>
-
-              <!-- Legend -->
-              <div class="legend">
-                {#each chartData.account_series as s, i}
-                  <span class="legend-item">
-                    <span class="legend-dot" style="background:{seriesColor(s, i)}"></span>
-                    {s.institution} ···{s.account_number_last4}
-                    {#if s.account_type}
-                      <span class="legend-type">({s.account_type.replace("_", " ")})</span>
-                    {/if}
-                  </span>
-                {/each}
+              <div class="chart-wrap">
+                <canvas bind:this={canvasEl}></canvas>
               </div>
             </section>
 
-            <!-- Summary cards -->
-            <section class="cards-row" aria-label="Monthly averages">
-              {#if cards.hasCc}
+            <!-- Summary cards — averages for selected range -->
+            <section class="cards-section" aria-label="Monthly averages">
+              <p class="cards-range-label">
+                Averages for {xMonthName(chartFrom)} '{chartFrom.slice(2,4)} — {xMonthName(chartTo)} '{chartTo.slice(2,4)}
+              </p>
+              <div class="cards-row">
+                {#if cards.hasCc}
+                  <div class="card">
+                    <p class="card-label">Avg CC Utilization</p>
+                    <p class="card-value">{fmt(cards.avgCcBalance)}</p>
+                    <p class="card-sub">{cards.avgCcUtilPct.toFixed(1)}% of {fmt(CC_CREDIT_LIMIT)} limit</p>
+                  </div>
+                {/if}
                 <div class="card">
-                  <p class="card-label">Avg CC Utilization</p>
-                  <p class="card-value">{fmt(cards.avgCcBalance)}</p>
-                  <p class="card-sub">{cards.avgCcUtilPct.toFixed(1)}% of {fmt(CC_CREDIT_LIMIT)} limit</p>
+                  <p class="card-label">Avg Monthly Income</p>
+                  <p class="card-value">{fmt(cards.avgIncome)}</p>
+                  <p class="card-sub">credits per month</p>
                 </div>
-              {/if}
-              <div class="card">
-                <p class="card-label">Avg Monthly Income</p>
-                <p class="card-value">{fmt(cards.avgIncome)}</p>
-                <p class="card-sub">credits per month</p>
-              </div>
-              <div class="card">
-                <p class="card-label">Avg Monthly Spend</p>
-                <p class="card-value">{fmt(cards.avgSpend)}</p>
-                <p class="card-sub">debits per month</p>
-              </div>
-              <div class="card" class:net-positive={cards.avgNet >= 0} class:net-negative={cards.avgNet < 0}>
-                <p class="card-label">Avg Monthly Net</p>
-                <p class="card-value">{fmt(Math.abs(cards.avgNet))}</p>
-                <p class="card-sub">{cards.avgNet >= 0 ? "surplus" : "deficit"} per month</p>
+                <div class="card">
+                  <p class="card-label">Avg Monthly Spend</p>
+                  <p class="card-value">{fmt(cards.avgSpend)}</p>
+                  <p class="card-sub">debits per month</p>
+                </div>
+                <div class="card" class:net-positive={cards.avgNet >= 0} class:net-negative={cards.avgNet < 0}>
+                  <p class="card-label">Avg Monthly Net</p>
+                  <p class="card-value">{fmt(Math.abs(cards.avgNet))}</p>
+                  <p class="card-sub">{cards.avgNet >= 0 ? "surplus" : "deficit"} per month</p>
+                </div>
               </div>
             </section>
           {:else}
@@ -654,23 +678,57 @@
           {/if}
 
         {:else if activeView === "accounts"}
-          <section class="cards-row" aria-label="Account balances">
-            {#if dashboard.account_balances.length === 0}
+          <section class="accounts-section" aria-label="Accounts">
+            <h2 class="section-title">Accounts</h2>
+            {#if accounts.length === 0}
               <p class="hint">No accounts yet. Import a statement to get started.</p>
             {:else}
-              {#each dashboard.account_balances as acct}
-                <div class="card">
-                  <p class="card-label">
-                    {acct.institution} ···{acct.account_number_last4}
-                  </p>
-                  <p class="card-value">
-                    {acct.closing_balance != null
-                      ? fmt(acct.closing_balance)
-                      : "–"}
-                  </p>
-                  <p class="card-sub">closing balance · {acct.statement_period}</p>
-                </div>
-              {/each}
+              <ul class="accounts-list">
+                {#each accounts as acct (acct.id)}
+                  {@const swatchColor = acct.color ?? seriesColorFallback(acct, accounts.indexOf(acct))}
+                  <li class="account-row">
+                    <!-- Color swatch -->
+                    <label class="swatch-wrap" title="Change color">
+                      <span class="color-swatch" style="background:{swatchColor}"></span>
+                      <input
+                        type="color"
+                        class="color-input"
+                        value={swatchColor}
+                        onchange={(e) => updateAccountColor(acct, (e.currentTarget as HTMLInputElement).value)}
+                      />
+                    </label>
+
+                    <!-- Name (editable) -->
+                    <div class="account-name-wrap">
+                      {#if editingAccountId === acct.id}
+                        <input
+                          class="name-input"
+                          type="text"
+                          bind:value={editingName}
+                          onblur={() => commitEditName(acct)}
+                          onkeydown={(e) => { if (e.key === "Enter") commitEditName(acct); if (e.key === "Escape") editingAccountId = null; }}
+                          use:focusOnMount
+                        />
+                      {:else}
+                        <button class="name-display" onclick={() => startEditName(acct)} title="Click to edit name">
+                          {acct.display_name ?? acct.institution}
+                        </button>
+                      {/if}
+                      <span class="account-sub">···{acct.account_number_last4}{acct.account_type ? ` · ${acct.account_type.replace("_", " ")}` : ""}</span>
+                    </div>
+
+                    <!-- Balance -->
+                    <div class="account-balance">
+                      {#if acct.closing_balance != null}
+                        <span class="balance-value">{fmt(acct.closing_balance)}</span>
+                        <span class="balance-period">{acct.statement_period}</span>
+                      {:else}
+                        <span class="balance-value">—</span>
+                      {/if}
+                    </div>
+                  </li>
+                {/each}
+              </ul>
             {/if}
           </section>
         {:else if activeView === "transactions"}
@@ -835,7 +893,6 @@
     gap: 0.25rem;
     background: #ebebeb;
     border-right: 1px solid #ddd;
-
   }
 
   @media (prefers-color-scheme: dark) {
@@ -855,9 +912,7 @@
     border-radius: 8px;
     color: #888;
     cursor: pointer;
-    transition:
-      background 0.15s,
-      color 0.15s;
+    transition: background 0.15s, color 0.15s;
   }
 
   .nav-btn:hover {
@@ -922,9 +977,7 @@
     flex-direction: column;
     align-items: center;
     gap: 0.75rem;
-    transition:
-      border-color 0.2s,
-      background 0.2s;
+    transition: border-color 0.2s, background 0.2s;
   }
 
   .drop-zone.dragging {
@@ -966,7 +1019,7 @@
     to { transform: rotate(360deg); }
   }
 
-  /* ── Cards ── */
+  /* ── State card ── */
 
   .state-card {
     width: 100%;
@@ -983,6 +1036,8 @@
     border: 1px solid #e53e3e;
     background: rgba(229, 62, 62, 0.05);
   }
+
+  /* ── Toast ── */
 
   .import-toast {
     position: fixed;
@@ -1016,66 +1071,13 @@
     }
   }
 
-  .cards-row {
+  /* ── Chart ── */
+
+  .chart-section {
     width: 100%;
     max-width: 900px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 1rem;
-    margin-bottom: 2rem;
+    margin-bottom: 1rem;
   }
-
-  .card {
-    flex: 1 1 160px;
-    background: #fff;
-    border: 1px solid #e2e8f0;
-    border-radius: 10px;
-    padding: 1rem 1.25rem;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .card {
-      background: #2d2d2d;
-      border-color: #3a3a3a;
-    }
-  }
-
-  .card.net-positive {
-    border-color: rgba(56, 161, 105, 0.4);
-  }
-
-  .card.net-negative {
-    border-color: rgba(229, 62, 62, 0.4);
-  }
-
-  .card-label {
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #666;
-    margin: 0 0 0.3rem;
-  }
-
-  .card-value {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin: 0 0 0.2rem;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .card-sub {
-    font-size: 0.75rem;
-    color: #888;
-    margin: 0;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .card-label,
-    .card-sub { color: #aaa; }
-  }
-
-  /* ── Chart ── */
 
   .chart-header {
     display: flex;
@@ -1126,74 +1128,209 @@
     color: #aaa;
   }
 
-  .chart-section {
-    width: 100%;
-    max-width: 900px;
-    margin-bottom: 1.5rem;
-  }
-
   .chart-wrap {
     width: 100%;
-    overflow: hidden;
-    border-radius: 8px;
+    height: 260px;
+    position: relative;
   }
 
-  .grid-line {
-    stroke: #e2e8f0;
-    stroke-width: 1;
+  .chart-wrap canvas {
+    width: 100% !important;
+    height: 100% !important;
   }
 
-  .zero-line {
-    stroke: #94a3b8;
-    stroke-width: 1;
+  /* ── Summary cards ── */
+
+  .cards-section {
+    width: 100%;
+    max-width: 900px;
+    margin-bottom: 2rem;
+  }
+
+  .cards-range-label {
+    font-size: 0.75rem;
+    color: #888;
+    margin: 0 0 0.6rem;
+    font-weight: 500;
   }
 
   @media (prefers-color-scheme: dark) {
-    .grid-line { stroke: #2d3748; }
-    .zero-line { stroke: #4a5568; }
+    .cards-range-label { color: #777; }
   }
 
-  .axis-label {
-    font-size: 11px;
-    fill: #888;
-    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  }
-
-  .y-label {
-    text-anchor: end;
-    dominant-baseline: middle;
-  }
-
-  .x-label {
-    text-anchor: middle;
-  }
-
-  /* ── Legend ── */
-
-  .legend {
+  .cards-row {
     display: flex;
     flex-wrap: wrap;
-    gap: 0.75rem 1.5rem;
-    margin-top: 0.75rem;
-    font-size: 0.82rem;
+    gap: 1rem;
   }
 
-  .legend-item {
+  .card {
+    flex: 1 1 160px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .card {
+      background: #2d2d2d;
+      border-color: #3a3a3a;
+    }
+  }
+
+  .card.net-positive { border-color: rgba(56, 161, 105, 0.4); }
+  .card.net-negative { border-color: rgba(229, 62, 62, 0.4); }
+
+  .card-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    margin: 0 0 0.3rem;
+  }
+
+  .card-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0 0 0.2rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card-sub {
+    font-size: 0.75rem;
+    color: #888;
+    margin: 0;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .card-label, .card-sub { color: #aaa; }
+  }
+
+  /* ── Accounts list ── */
+
+  .accounts-section {
+    width: 100%;
+    max-width: 700px;
+  }
+
+  .accounts-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .account-row {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
+    gap: 1rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid #e2e8f0;
   }
 
-  .legend-dot {
-    width: 10px;
-    height: 10px;
+  @media (prefers-color-scheme: dark) {
+    .account-row { border-bottom-color: #2d3748; }
+  }
+
+  .swatch-wrap {
+    cursor: pointer;
+    flex-shrink: 0;
+    position: relative;
+    display: flex;
+    align-items: center;
+  }
+
+  .color-swatch {
+    display: block;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
+    border: 2px solid rgba(0,0,0,0.15);
+    transition: transform 0.12s;
+  }
+
+  .swatch-wrap:hover .color-swatch {
+    transform: scale(1.2);
+  }
+
+  .color-input {
+    position: absolute;
+    width: 0;
+    height: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .account-name-wrap {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+
+  .name-display {
+    all: unset;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 1px dashed transparent;
+    transition: border-color 0.15s;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .name-display:hover {
+    border-bottom-color: #aaa;
+  }
+
+  .name-input {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    border: none;
+    border-bottom: 1px solid #396cd8;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    width: 100%;
+  }
+
+  .account-sub {
+    font-size: 0.75rem;
+    color: #888;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .account-sub { color: #777; }
+  }
+
+  .account-balance {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
     flex-shrink: 0;
   }
 
-  .legend-type {
+  .balance-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .balance-period {
+    font-size: 0.72rem;
     color: #888;
-    font-size: 0.78rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .balance-period { color: #777; }
   }
 
   /* ── Sections ── */
@@ -1298,9 +1435,7 @@
 
   /* ── Settings ── */
 
-  .nav-bottom {
-    margin-top: auto;
-  }
+  .nav-bottom { margin-top: auto; }
 
   .settings-section {
     width: 100%;
@@ -1343,9 +1478,7 @@
     transition: border-color 0.15s;
   }
 
-  .field-input:focus {
-    border-color: #396cd8;
-  }
+  .field-input:focus { border-color: #396cd8; }
 
   @media (prefers-color-scheme: dark) {
     .field-input {
@@ -1387,7 +1520,7 @@
 
   /* ── Button ── */
 
-  button:not(.nav-btn) {
+  button:not(.nav-btn):not(.name-display) {
     border-radius: 8px;
     border: 1px solid transparent;
     padding: 0.5em 1.2em;
@@ -1399,7 +1532,7 @@
     transition: background 0.2s;
   }
 
-  button:not(.nav-btn):hover {
+  button:not(.nav-btn):not(.name-display):hover {
     background-color: #2d5bc7;
   }
 </style>

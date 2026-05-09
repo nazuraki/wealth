@@ -1,3 +1,4 @@
+mod accounts;
 mod chart;
 mod dashboard;
 mod importer;
@@ -21,6 +22,12 @@ pub fn run() {
             sql: db::MIGRATION_002,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 5,
+            description: "account display name and color",
+            sql: db::MIGRATION_005,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -35,6 +42,8 @@ pub fn run() {
             dashboard::get_dashboard,
             chart::get_available_periods,
             chart::get_chart_data,
+            accounts::get_accounts,
+            accounts::update_account,
             settings::get_settings,
             settings::save_settings,
         ])
