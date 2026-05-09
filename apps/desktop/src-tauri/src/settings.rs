@@ -7,6 +7,10 @@ use tauri::{AppHandle, Manager};
 pub struct AppSettings {
     pub api_key: Option<String>,
     pub endpoint_url: Option<String>,
+    pub window_x: Option<i32>,
+    pub window_y: Option<i32>,
+    pub window_width: Option<u32>,
+    pub window_height: Option<u32>,
 }
 
 fn settings_path(data_dir: &Path) -> std::path::PathBuf {
@@ -59,6 +63,7 @@ mod tests {
         let original = AppSettings {
             api_key: Some("sk-test-key".into()),
             endpoint_url: Some("https://example.com/v1/messages".into()),
+            ..Default::default()
         };
         save(dir.path(), &original).unwrap();
         let loaded = load(dir.path());
@@ -72,7 +77,7 @@ mod tests {
     #[test]
     fn save_partial_and_load() {
         let dir = TempDir::new().unwrap();
-        let s = AppSettings { api_key: Some("key-only".into()), endpoint_url: None };
+        let s = AppSettings { api_key: Some("key-only".into()), ..Default::default() };
         save(dir.path(), &s).unwrap();
         let loaded = load(dir.path());
         assert_eq!(loaded.api_key.as_deref(), Some("key-only"));
