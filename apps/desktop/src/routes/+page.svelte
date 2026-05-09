@@ -74,9 +74,14 @@
     | "importing"
     | "import-error";
 
-  type ActiveView = "dashboard" | "accounts" | "transactions" | "imports";
+  type ActiveView = "dashboard" | "accounts" | "transactions" | "imports" | "settings";
 
   // ── State ─────────────────────────────────────────────────────────────────────
+
+  interface AppSettings {
+    api_key: string | null;
+    endpoint_url: string | null;
+  }
 
   let pageState = $state<PageState>("initializing");
   let activeView = $state<ActiveView>("dashboard");
@@ -87,6 +92,10 @@
   let dragging = $state(false);
   let importBanner = $state(false);
   let chartWidth = $state(600);
+
+  let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
+  let settingsSaved = $state(false);
+  let settingsSaving = $state(false);
 
   // ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -106,8 +115,34 @@
     }
   }
 
+  async function loadSettings() {
+    try {
+      const s = await invoke<AppSettings>("get_settings");
+      settingsForm = { apiKey: s.api_key ?? "", endpointUrl: s.endpoint_url ?? "" };
+    } catch {
+      // non-fatal
+    }
+  }
+
+  async function saveSettings() {
+    settingsSaving = true;
+    try {
+      await invoke("save_settings", {
+        settings: {
+          api_key: settingsForm.apiKey || null,
+          endpoint_url: settingsForm.endpointUrl || null,
+        },
+      });
+      settingsSaved = true;
+      setTimeout(() => (settingsSaved = false), 2500);
+    } finally {
+      settingsSaving = false;
+    }
+  }
+
   onMount(() => {
     loadDashboard();
+    loadSettings();
 
     const win = getCurrentWindow();
     const unlistenPromise = win.onDragDropEvent((event) => {
@@ -328,6 +363,7 @@
     { id: "accounts", label: "Accounts" },
     { id: "transactions", label: "Transactions" },
     { id: "imports", label: "Import Log" },
+    { id: "settings", label: "Settings" },
   ];
 </script>
 
@@ -346,6 +382,7 @@
       <button
         class="nav-btn"
         class:active={activeView === item.id}
+        class:nav-bottom={item.id === "settings"}
         onclick={() => (activeView = item.id)}
         title={item.label}
         aria-label={item.label}
@@ -381,6 +418,11 @@
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
             <polyline points="17 8 12 3 7 8" />
             <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+        {:else if item.id === "settings"}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
         {/if}
       </button>
@@ -616,6 +658,45 @@
           </section>
         {/if}
       {/if}
+    {/if}
+
+    {#if activeView === "settings"}
+      <section class="settings-section" aria-label="Settings">
+        <h2 class="section-title">Settings</h2>
+        <form class="settings-form" onsubmit={(e) => { e.preventDefault(); saveSettings(); }}>
+          <div class="field-group">
+            <label for="api-key" class="field-label">API Key</label>
+            <input
+              id="api-key"
+              type="password"
+              class="field-input"
+              placeholder="sk-ant-…"
+              bind:value={settingsForm.apiKey}
+              autocomplete="off"
+            />
+            <p class="field-hint">Stored locally in app data. Falls back to the <code>ANTHROPIC_API_KEY</code> environment variable if blank.</p>
+          </div>
+          <div class="field-group">
+            <label for="endpoint-url" class="field-label">Endpoint URL</label>
+            <input
+              id="endpoint-url"
+              type="text"
+              class="field-input"
+              placeholder="https://api.anthropic.com/v1/messages"
+              bind:value={settingsForm.endpointUrl}
+            />
+            <p class="field-hint">Leave blank to use the default Anthropic API endpoint.</p>
+          </div>
+          <div class="settings-actions">
+            <button type="submit" disabled={settingsSaving}>
+              {settingsSaving ? "Saving…" : "Save"}
+            </button>
+            {#if settingsSaved}
+              <span class="settings-saved">Saved</span>
+            {/if}
+          </div>
+        </form>
+      </section>
     {/if}
   </main>
 </div>
@@ -1076,6 +1157,95 @@
 
   .error-icon { color: #e53e3e; opacity: 1; }
   .success-icon { color: #38a169; opacity: 1; }
+
+  /* ── Settings ── */
+
+  .nav-bottom {
+    margin-top: auto;
+  }
+
+  .settings-section {
+    width: 100%;
+    max-width: 540px;
+  }
+
+  .settings-form {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .field-label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #555;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .field-label { color: #aaa; }
+  }
+
+  .field-input {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 0.9rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    color: inherit;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .field-input:focus {
+    border-color: #396cd8;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .field-input {
+      background: #2d2d2d;
+      border-color: #444;
+      color: #f6f6f6;
+    }
+  }
+
+  .field-hint {
+    font-size: 0.78rem;
+    color: #888;
+    margin: 0;
+  }
+
+  .field-hint code {
+    font-family: monospace;
+    background: rgba(0, 0, 0, 0.06);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .field-hint { color: #aaa; }
+    .field-hint code { background: rgba(255,255,255,0.08); }
+  }
+
+  .settings-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+  }
+
+  .settings-saved {
+    font-size: 0.85rem;
+    color: #38a169;
+    font-weight: 500;
+  }
 
   /* ── Button ── */
 
