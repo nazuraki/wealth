@@ -30,7 +30,20 @@ pub struct ChartData {
     pub monthly_flows: Vec<MonthlyFlow>,
 }
 
-fn query_chart_data(conn: &Connection) -> Result<Option<ChartData>> {
+fn query_available_periods(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT statement_period FROM \
+         (SELECT DISTINCT statement_period FROM statements ORDER BY statement_period DESC LIMIT 24) \
+         ORDER BY statement_period ASC",
+    )?;
+    let periods = stmt
+        .query_map([], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(periods)
+}
+
+fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<ChartData>> {
     let account_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))?;
     if account_count == 0 {
@@ -53,11 +66,11 @@ fn query_chart_data(conn: &Connection) -> Result<Option<ChartData>> {
             "SELECT statement_period, closing_balance \
              FROM statements \
              WHERE account_id = ?1 \
-               AND date(statement_period || '-01') >= date('now', '-12 months') \
+               AND statement_period >= ?2 AND statement_period <= ?3 \
              ORDER BY statement_period",
         )?;
         let points: Vec<BalancePoint> = pt_stmt
-            .query_map(params![account_id], |r| {
+            .query_map(params![account_id, from, to], |r| {
                 Ok(BalancePoint {
                     period: r.get(0)?,
                     closing_balance: r.get(1)?,
@@ -81,12 +94,12 @@ fn query_chart_data(conn: &Connection) -> Result<Option<ChartData>> {
                 COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0.0 END), 0.0), \
                 COALESCE(SUM(CASE WHEN t.type = 'debit'  THEN t.amount ELSE 0.0 END), 0.0) \
          FROM transactions t \
-         WHERE date(t.date) >= date('now', '-12 months') \
+         WHERE strftime('%Y-%m', t.date) >= ?1 AND strftime('%Y-%m', t.date) <= ?2 \
          GROUP BY month \
          ORDER BY month",
     )?;
     let monthly_flows: Vec<MonthlyFlow> = flow_stmt
-        .query_map([], |r| {
+        .query_map(params![from, to], |r| {
             Ok(MonthlyFlow {
                 period: r.get(0)?,
                 income: r.get(1)?,
@@ -102,22 +115,35 @@ fn query_chart_data(conn: &Connection) -> Result<Option<ChartData>> {
     }))
 }
 
-fn do_get_chart_data(app: &AppHandle) -> Result<Option<ChartData>> {
+fn open_conn(app: &AppHandle) -> Result<Connection> {
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("wealth.db");
-    let conn = Connection::open(&db_path)?;
+    let conn = Connection::open(data_dir.join("wealth.db"))?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    query_chart_data(&conn)
+    Ok(conn)
 }
 
 #[tauri::command]
-pub async fn get_chart_data(app: AppHandle) -> Result<Option<ChartData>, String> {
-    tauri::async_runtime::spawn_blocking(move || do_get_chart_data(&app))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+pub async fn get_available_periods(app: AppHandle) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_conn(&app)?;
+        query_available_periods(&conn)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_chart_data(app: AppHandle, from: String, to: String) -> Result<Option<ChartData>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_conn(&app)?;
+        query_chart_data(&conn, &from, &to)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -185,7 +211,7 @@ mod tests {
     #[test]
     fn empty_db_returns_none() {
         let conn = open_test_db();
-        assert!(query_chart_data(&conn).unwrap().is_none());
+        assert!(query_chart_data(&conn, "2000-01", "2099-12").unwrap().is_none());
     }
 
     #[test]
@@ -195,35 +221,55 @@ mod tests {
         let period = sqlite_period(&conn, "-1 month");
         seed_statement(&conn, acct, &period, Some(5000.0));
 
-        let data = query_chart_data(&conn).unwrap().unwrap();
+        let data = query_chart_data(&conn, &period, &period).unwrap().unwrap();
         assert_eq!(data.account_series.len(), 1);
         assert_eq!(data.account_series[0].account_type, Some("checking".into()));
         assert_eq!(data.account_series[0].points[0].closing_balance, Some(5000.0));
     }
 
     #[test]
-    fn excludes_statements_older_than_12_months() {
+    fn from_to_filter_excludes_out_of_range() {
         let conn = open_test_db();
         let acct = seed_account(&conn, "Old Bank", "0000", Some("savings"));
-        let old = sqlite_period(&conn, "-13 months");
+        let old = sqlite_period(&conn, "-24 months");
+        let recent = sqlite_period(&conn, "-1 month");
         seed_statement(&conn, acct, &old, Some(9999.0));
+        seed_statement(&conn, acct, &recent, Some(1111.0));
 
-        let data = query_chart_data(&conn).unwrap().unwrap();
-        assert!(data.account_series.is_empty());
+        let data = query_chart_data(&conn, &recent, &recent).unwrap().unwrap();
+        assert_eq!(data.account_series[0].points.len(), 1);
+        assert_eq!(data.account_series[0].points[0].closing_balance, Some(1111.0));
     }
 
     #[test]
     fn monthly_flows_aggregate_correctly() {
         let conn = open_test_db();
         let acct = seed_account(&conn, "Flow Bank", "5678", Some("checking"));
-        let stmt = seed_statement(&conn, acct, &sqlite_period(&conn, "-1 month"), None);
+        let period = sqlite_period(&conn, "-1 month");
+        let stmt = seed_statement(&conn, acct, &period, None);
         let recent = sqlite_date(&conn, "-20 days");
         seed_transaction(&conn, stmt, &recent, 3000.0, "credit");
         seed_transaction(&conn, stmt, &recent, 500.0, "debit");
 
-        let data = query_chart_data(&conn).unwrap().unwrap();
+        let data = query_chart_data(&conn, &period, &period).unwrap().unwrap();
         assert_eq!(data.monthly_flows.len(), 1);
         assert_eq!(data.monthly_flows[0].income, 3000.0);
         assert_eq!(data.monthly_flows[0].spend, 500.0);
+    }
+
+    #[test]
+    fn available_periods_returns_up_to_24_ascending() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Test Bank", "1234", None);
+        for i in 0..30 {
+            let period = format!("2023-{:02}", (i % 12) + 1);
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO statements (account_id, statement_period) VALUES (?1, ?2)",
+                params![acct, period],
+            );
+        }
+        let periods = query_available_periods(&conn).unwrap();
+        assert!(periods.len() <= 24);
+        assert!(periods.windows(2).all(|w| w[0] <= w[1]));
     }
 }

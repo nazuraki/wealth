@@ -33,6 +33,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             importer::import_statement,
             dashboard::get_dashboard,
+            chart::get_available_periods,
             chart::get_chart_data,
             settings::get_settings,
             settings::save_settings,
