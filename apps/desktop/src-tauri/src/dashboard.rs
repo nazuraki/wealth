@@ -110,7 +110,7 @@ fn do_get_dashboard(app: &AppHandle) -> Result<Option<DashboardData>> {
     std::fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("wealth.db");
     let conn = Connection::open(&db_path)?;
-    conn.execute_batch(db::MIGRATION_001)?;
+    db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     query_dashboard(&conn)
 }
@@ -130,7 +130,7 @@ mod tests {
 
     fn open_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(db::MIGRATION_001).unwrap();
+        db::run_migrations(&conn).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         conn
     }
