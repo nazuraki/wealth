@@ -175,9 +175,13 @@
 
   $effect(() => {
     if (chartFrom && chartTo) {
+      console.log("[chart] fetching get_chart_data", { from: chartFrom, to: chartTo });
       invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
-        .then(data => { chartData = data; })
-        .catch(() => {});
+        .then(data => {
+          console.log("[chart] got data, monthly_flows:", data?.monthly_flows?.length ?? "null");
+          chartData = data;
+        })
+        .catch((e) => { console.error("[chart] get_chart_data failed:", e); });
     }
   });
 
@@ -281,6 +285,7 @@
         const prevTo = chartTo;
         chartTo = periods[periods.length - 1];
         chartFrom = periods.length >= 12 ? periods[periods.length - 12] : periods[0];
+        console.log("[dashboard] periods:", periods, "chartFrom:", chartFrom, "chartTo:", chartTo, "prevTo:", prevTo);
         if (chartTo === prevTo && chartFrom) {
           invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
             .then(data => { chartData = data; })
