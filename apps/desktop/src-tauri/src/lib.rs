@@ -3,6 +3,7 @@ mod chart;
 mod dashboard;
 mod importer;
 mod settings;
+mod transactions;
 
 use std::path::PathBuf;
 use tauri::Manager;
@@ -51,6 +52,7 @@ pub fn run() {
             accounts::update_account,
             settings::get_settings,
             settings::save_settings,
+            transactions::get_transactions,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

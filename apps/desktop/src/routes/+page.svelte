@@ -106,6 +106,26 @@
     endpoint_url: string | null;
   }
 
+  interface Transaction {
+    id: number;
+    date: string;
+    description: string;
+    category: string;
+    amount: number;
+    kind: string;
+    account_id: number;
+    institution: string;
+    account_number_last4: string;
+  }
+
+  interface TransactionFilters {
+    account_id: number | null;
+    date_from: string | null;
+    date_to: string | null;
+    category: string | null;
+    kind: string | null;
+  }
+
   // ── State ─────────────────────────────────────────────────────────────────────
 
   let pageState = $state<PageState>("initializing");
@@ -124,6 +144,20 @@
   let accounts = $state<Account[]>([]);
   let editingAccountId = $state<number | null>(null);
   let editingName = $state("");
+
+  let transactions = $state<Transaction[]>([]);
+  let txFilters = $state<TransactionFilters>({
+    account_id: null,
+    date_from: null,
+    date_to: null,
+    category: null,
+    kind: null,
+  });
+  let txFilterAccount = $state("");
+  let txFilterDateFrom = $state("");
+  let txFilterDateTo = $state("");
+  let txFilterCategory = $state("");
+  let txFilterKind = $state("");
 
   function focusOnMount(node: HTMLElement) {
     node.focus();
@@ -267,6 +301,32 @@
       // non-fatal
     }
   }
+
+  async function loadTransactions() {
+    try {
+      transactions = await invoke<Transaction[]>("get_transactions", { filters: txFilters });
+    } catch {
+      transactions = [];
+    }
+  }
+
+  $effect(() => {
+    txFilters = {
+      account_id: txFilterAccount ? Number(txFilterAccount) : null,
+      date_from: txFilterDateFrom || null,
+      date_to: txFilterDateTo || null,
+      category: txFilterCategory || null,
+      kind: txFilterKind || null,
+    };
+  });
+
+  $effect(() => {
+    if (activeView === "transactions") {
+      // re-run whenever txFilters changes
+      void txFilters;
+      loadTransactions();
+    }
+  });
 
   async function loadSettings() {
     try {
@@ -504,6 +564,7 @@
   function handleNavClick(id: ActiveView) {
     activeView = id;
     if (id === "accounts") loadAccounts();
+    if (id === "transactions" && accounts.length === 0) loadAccounts();
   }
 </script>
 
@@ -732,20 +793,84 @@
             {/if}
           </section>
         {:else if activeView === "transactions"}
-          <div class="center-frame">
-            <div class="state-card">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <line x1="8" y1="6" x2="21" y2="6" />
-                <line x1="8" y1="12" x2="21" y2="12" />
-                <line x1="8" y1="18" x2="21" y2="18" />
-                <circle cx="3" cy="6" r="1" fill="currentColor" stroke="none" />
-                <circle cx="3" cy="12" r="1" fill="currentColor" stroke="none" />
-                <circle cx="3" cy="18" r="1" fill="currentColor" stroke="none" />
-              </svg>
-              <p class="headline">Transaction History</p>
-              <p class="hint">Coming soon</p>
+          <section class="transactions-section" aria-label="Transactions">
+            <h2 class="section-title">Transactions</h2>
+            <div class="tx-filters" role="search" aria-label="Filter transactions">
+              <select
+                class="filter-select"
+                bind:value={txFilterAccount}
+                aria-label="Filter by account"
+              >
+                <option value="">All accounts</option>
+                {#each accounts as acct (acct.id)}
+                  <option value={String(acct.id)}>
+                    {acct.display_name ?? acct.institution} ···{acct.account_number_last4}
+                  </option>
+                {/each}
+              </select>
+              <input
+                type="date"
+                class="filter-input"
+                bind:value={txFilterDateFrom}
+                aria-label="Date from"
+                title="From date"
+              />
+              <input
+                type="date"
+                class="filter-input"
+                bind:value={txFilterDateTo}
+                aria-label="Date to"
+                title="To date"
+              />
+              <input
+                type="text"
+                class="filter-input filter-category"
+                placeholder="Category"
+                bind:value={txFilterCategory}
+                aria-label="Filter by category"
+              />
+              <select
+                class="filter-select"
+                bind:value={txFilterKind}
+                aria-label="Filter by type"
+              >
+                <option value="">All types</option>
+                <option value="debit">Debit</option>
+                <option value="credit">Credit</option>
+                <option value="transfer">Transfer</option>
+              </select>
             </div>
-          </div>
+            {#if transactions.length === 0}
+              <div class="tx-empty">
+                <p class="hint">No transactions match the current filters.</p>
+              </div>
+            {:else}
+              <table class="tx-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Category</th>
+                    <th>Account</th>
+                    <th class="num-col">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each transactions as tx (tx.id)}
+                    <tr>
+                      <td class="tx-date">{tx.date}</td>
+                      <td class="tx-desc">{tx.description}</td>
+                      <td class="tx-cat">{tx.category}</td>
+                      <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
+                      <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
+                        {tx.kind === "debit" ? "-" : "+"}{fmt(tx.amount)}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </section>
         {:else if activeView === "imports"}
           <section class="recent-section" aria-label="Import log">
             <h2 class="section-title">Import Log</h2>
@@ -1534,5 +1659,126 @@
 
   button:not(.nav-btn):not(.name-display):hover {
     background-color: #2d5bc7;
+  }
+
+  /* ── Transactions ── */
+
+  .transactions-section {
+    width: 100%;
+    max-width: 960px;
+  }
+
+  .tx-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .filter-select,
+  .filter-input {
+    font-size: 0.85rem;
+    padding: 0.35em 0.6em;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    color: inherit;
+    min-width: 120px;
+  }
+
+  .filter-category {
+    min-width: 160px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .filter-select,
+    .filter-input {
+      background: #222;
+      border-color: #444;
+      color: #f6f6f6;
+    }
+  }
+
+  .tx-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+
+  .tx-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    color: #666;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .tx-table td {
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid #f0f0f0;
+    vertical-align: middle;
+  }
+
+  .tx-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .tx-date {
+    white-space: nowrap;
+    color: #888;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tx-desc {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tx-cat {
+    color: #888;
+    font-size: 0.83rem;
+  }
+
+  .tx-acct {
+    color: #888;
+    font-size: 0.83rem;
+    white-space: nowrap;
+  }
+
+  .num-col {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .tx-debit {
+    color: #e05252;
+  }
+
+  .tx-credit {
+    color: #38a169;
+  }
+
+  .tx-empty {
+    padding: 3rem 0;
+    text-align: center;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-table th {
+      border-bottom-color: #333;
+      color: #888;
+    }
+
+    .tx-table td {
+      border-bottom-color: #222;
+    }
   }
 </style>
