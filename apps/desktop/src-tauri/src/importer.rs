@@ -16,6 +16,22 @@ pub struct ImportSummary {
     pub transaction_count: usize,
 }
 
+// ── Transfer detection ────────────────────────────────────────────────────────
+
+const TRANSFER_PATTERNS: &[&str] = &[
+    "payment - thank you",
+    "autopay",
+    "online pmt",
+    "ach payment",
+    "online payment",
+    "online transfer",
+];
+
+fn is_transfer(description: &str) -> bool {
+    let lower = description.to_lowercase();
+    TRANSFER_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 // ── DB write (testable inner fn) ──────────────────────────────────────────────
 
 fn write_account_to_tx(
@@ -70,9 +86,14 @@ fn write_account_to_tx(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for t in &extraction.transactions {
-            let kind = match t.transaction_type {
-                TransactionType::Debit => "debit",
-                TransactionType::Credit => "credit",
+            let kind = if is_transfer(&t.description) {
+                "transfer"
+            } else {
+                match t.transaction_type {
+                    TransactionType::Debit => "debit",
+                    TransactionType::Credit => "credit",
+                    TransactionType::Transfer => "transfer",
+                }
             };
             stmt.execute(params![
                 statement_id,
@@ -164,6 +185,26 @@ pub async fn import_statement(app: AppHandle, db: State<'_, crate::DbPath>, path
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_transfer_matches_known_patterns() {
+        assert!(is_transfer("PAYMENT - THANK YOU"));
+        assert!(is_transfer("Payment - Thank You"));
+        assert!(is_transfer("AUTOPAY"));
+        assert!(is_transfer("Chase Autopay"));
+        assert!(is_transfer("ONLINE PMT"));
+        assert!(is_transfer("ACH PAYMENT"));
+        assert!(is_transfer("ONLINE PAYMENT"));
+        assert!(is_transfer("ONLINE TRANSFER"));
+    }
+
+    #[test]
+    fn is_transfer_does_not_match_regular_transactions() {
+        assert!(!is_transfer("WHOLE FOODS MARKET"));
+        assert!(!is_transfer("DIRECT DEPOSIT"));
+        assert!(!is_transfer("AMAZON.COM"));
+        assert!(!is_transfer("TRANSFER FEE"));
+    }
     use extractor::{Account, AccountExtraction, ExtractionResult, Summary, Transaction, TransactionType};
 
     fn open_test_db() -> Connection {
@@ -340,5 +381,52 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tx_count, 4);
+    }
+
+    #[test]
+    fn transfer_description_written_as_transfer_type() {
+        let result = ExtractionResult {
+            accounts: vec![AccountExtraction {
+                account: Account {
+                    institution: "Big Bank".into(),
+                    account_number_last4: "1111".into(),
+                    account_type: Some("checking".into()),
+                    statement_period: "2024-12".into(),
+                    opening_balance: None,
+                    closing_balance: None,
+                },
+                transactions: vec![
+                    Transaction {
+                        date: "2024-12-01".into(),
+                        description: "PAYMENT - THANK YOU".into(),
+                        category: "Transfer".into(),
+                        amount: 500.0,
+                        transaction_type: TransactionType::Credit,
+                    },
+                    Transaction {
+                        date: "2024-12-02".into(),
+                        description: "WHOLE FOODS MARKET".into(),
+                        category: "Groceries".into(),
+                        amount: 80.0,
+                        transaction_type: TransactionType::Debit,
+                    },
+                ],
+                summary: Summary { total_debits: 80.0, total_credits: 500.0, transaction_count: 2 },
+            }],
+        };
+
+        let mut conn = open_test_db();
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "test.pdf", &result).unwrap();
+        tx.commit().unwrap();
+
+        let types: Vec<String> = conn
+            .prepare("SELECT type FROM transactions ORDER BY date")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(types, vec!["transfer", "debit"]);
     }
 }

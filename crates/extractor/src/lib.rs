@@ -19,6 +19,7 @@ pub struct Account {
 pub enum TransactionType {
     Debit,
     Credit,
+    Transfer,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
