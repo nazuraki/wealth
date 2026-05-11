@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import {
     Chart,
     LineController,
@@ -370,14 +370,18 @@
     }
   });
 
-  // Reload when navigating to transactions or when any filter changes
+  // Reload when navigating to transactions or when any filter changes.
+  // loadTxPage is called via untrack so its internal state reads (txLoading, etc.)
+  // don't become dependencies of this effect — only activeView and txFilterParams should.
   $effect(() => {
     if (activeView !== "transactions") return;
     const _p = txFilterParams; // establish dependency
-    txOffset = 0;
-    txLoadedRows = [];
-    txTotal = 0;
-    loadTxPage("reset");
+    untrack(() => {
+      txOffset = 0;
+      txLoadedRows = [];
+      txTotal = 0;
+      loadTxPage("reset");
+    });
   });
 
   // Scroll-based pagination: append when near bottom, prepend when near top
