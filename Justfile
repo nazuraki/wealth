@@ -12,15 +12,26 @@ install:
 dev:
     cd apps/desktop && npm run tauri dev
 
+# Run desktop app (dev mode)
+run: dev
+
 # Build desktop app
 build:
     cd apps/desktop && npm run tauri build
 
-# Run all checks (typecheck + Rust tests)
-check: typecheck cargo-test
+# Run all checks (lint + typecheck + test)
+check: lint typecheck test
+
+# Lint Rust code (read-only)
+lint:
+    cargo clippy --workspace
+
+# Fix Rust lint issues (write mode)
+fix:
+    cargo clippy --workspace --fix --allow-dirty
 
 # Run Rust tests
-cargo-test:
+test:
     cargo test --workspace
 
 # Type-check the desktop frontend

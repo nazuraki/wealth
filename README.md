@@ -37,11 +37,12 @@ cp .env.example .env   # add ANTHROPIC_API_KEY
 ## Development
 
 ```sh
-# Desktop app
-cd apps/desktop
-npm run tauri dev
+just dev
+```
 
-# Run extractor standalone
+Run the extractor standalone:
+
+```sh
 cd packages/extractor
 node src/index.js path/to/statement.pdf
 ```
@@ -49,6 +50,13 @@ node src/index.js path/to/statement.pdf
 ## Build
 
 ```sh
-cd apps/desktop
-npm run tauri build
+just build
 ```
+
+## Further reading
+
+See [docs/PURPOSE.md](docs/PURPOSE.md) for goals, non-goals, and intended audience.
+
+## License
+
+MIT
