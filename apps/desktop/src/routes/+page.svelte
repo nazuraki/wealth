@@ -303,14 +303,6 @@
     }
   }
 
-  let txFilterParams = $derived({
-    account_id: txFilterAccount ? Number(txFilterAccount) : null,
-    date_from: txFilterDateFrom || null,
-    date_to: txFilterDateTo || null,
-    category: txFilterCategory || null,
-    kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
-  });
-
   async function loadTxPage(direction: "reset" | "append" | "prepend") {
     if (txLoading && direction !== "reset") return;
     txLoading = true;
@@ -322,7 +314,15 @@
 
     try {
       const page = await invoke<TransactionPage>("get_transactions", {
-        filters: { ...txFilterParams, offset, limit: TX_PAGE_SIZE },
+        filters: {
+          account_id: txFilterAccount ? Number(txFilterAccount) : null,
+          date_from: txFilterDateFrom || null,
+          date_to: txFilterDateTo || null,
+          category: txFilterCategory || null,
+          kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
+          offset,
+          limit: TX_PAGE_SIZE,
+        },
       });
       if (myId !== txRequestId) return;
 
@@ -358,7 +358,15 @@
     }
   }
 
-  // Set default date range to latest statement month once periods are available
+  function resetAndLoadTransactions() {
+    txOffset = 0;
+    txLoadedRows = [];
+    txTotal = 0;
+    loadTxPage("reset");
+  }
+
+  // Set default date range to latest statement month once periods are available.
+  // If we're already on the transactions view when this fires, reload with the new dates.
   $effect(() => {
     if (availablePeriods.length > 0 && !txDateDefaultSet) {
       const latest = availablePeriods[availablePeriods.length - 1];
@@ -367,21 +375,8 @@
       txFilterDateFrom = `${y}-${String(m).padStart(2, "0")}-01`;
       txFilterDateTo = `${y}-${String(m).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
       txDateDefaultSet = true;
+      if (activeView === "transactions") untrack(resetAndLoadTransactions);
     }
-  });
-
-  // Reload when navigating to transactions or when any filter changes.
-  // loadTxPage is called via untrack so its internal state reads (txLoading, etc.)
-  // don't become dependencies of this effect — only activeView and txFilterParams should.
-  $effect(() => {
-    if (activeView !== "transactions") return;
-    const _p = txFilterParams; // establish dependency
-    untrack(() => {
-      txOffset = 0;
-      txLoadedRows = [];
-      txTotal = 0;
-      loadTxPage("reset");
-    });
   });
 
   // Scroll-based pagination: append when near bottom, prepend when near top
@@ -638,7 +633,10 @@
   function handleNavClick(id: ActiveView) {
     activeView = id;
     if (id === "accounts") loadAccounts();
-    if (id === "transactions" && accounts.length === 0) loadAccounts();
+    if (id === "transactions") {
+      if (accounts.length === 0) loadAccounts();
+      resetAndLoadTransactions();
+    }
   }
 </script>
 
@@ -873,6 +871,7 @@
               <select
                 class="filter-select"
                 bind:value={txFilterAccount}
+                onchange={resetAndLoadTransactions}
                 aria-label="Filter by account"
               >
                 <option value="">All accounts</option>
@@ -886,6 +885,7 @@
                 type="date"
                 class="filter-input"
                 bind:value={txFilterDateFrom}
+                onchange={resetAndLoadTransactions}
                 aria-label="Date from"
                 title="From date"
               />
@@ -893,6 +893,7 @@
                 type="date"
                 class="filter-input"
                 bind:value={txFilterDateTo}
+                onchange={resetAndLoadTransactions}
                 aria-label="Date to"
                 title="To date"
               />
@@ -901,19 +902,20 @@
                 class="filter-input filter-category"
                 placeholder="Category"
                 bind:value={txFilterCategory}
+                onchange={resetAndLoadTransactions}
                 aria-label="Filter by category"
               />
               <fieldset class="filter-kinds" aria-label="Transaction type">
                 <label class="kind-label">
-                  <input type="checkbox" bind:group={txFilterKinds} value="debit" />
+                  <input type="checkbox" bind:group={txFilterKinds} value="debit" onchange={resetAndLoadTransactions} />
                   Debit
                 </label>
                 <label class="kind-label">
-                  <input type="checkbox" bind:group={txFilterKinds} value="credit" />
+                  <input type="checkbox" bind:group={txFilterKinds} value="credit" onchange={resetAndLoadTransactions} />
                   Credit
                 </label>
                 <label class="kind-label">
-                  <input type="checkbox" bind:group={txFilterKinds} value="transfer" />
+                  <input type="checkbox" bind:group={txFilterKinds} value="transfer" onchange={resetAndLoadTransactions} />
                   Transfer
                 </label>
               </fieldset>
