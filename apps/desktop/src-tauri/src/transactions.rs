@@ -17,62 +17,98 @@ pub struct TransactionRow {
     pub account_number_last4: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TransactionPage {
+    pub rows: Vec<TransactionRow>,
+    pub total: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TransactionFilters {
     pub account_id: Option<i64>,
     pub date_from: Option<String>,
     pub date_to: Option<String>,
     pub category: Option<String>,
-    pub kind: Option<String>,
+    pub kinds: Option<Vec<String>>,
+    pub offset: i64,
+    pub limit: i64,
 }
 
-fn query_transactions(conn: &Connection, filters: &TransactionFilters) -> Result<Vec<TransactionRow>> {
-    let mut conditions: Vec<&str> = vec![];
+/// Build the WHERE clause and its parameter list from the filter.
+/// Called twice per query (once for COUNT, once for rows), so returns owned params each time.
+fn build_where(filters: &TransactionFilters) -> (String, Vec<Box<dyn ToSql>>) {
+    let mut conditions: Vec<String> = vec![];
     let mut params: Vec<Box<dyn ToSql>> = vec![];
 
     if let Some(acct_id) = filters.account_id {
-        conditions.push("a.id = ?");
+        conditions.push("a.id = ?".to_string());
         params.push(Box::new(acct_id));
     }
     if let Some(ref df) = filters.date_from {
-        conditions.push("t.date >= ?");
+        conditions.push("t.date >= ?".to_string());
         params.push(Box::new(df.clone()));
     }
     if let Some(ref dt) = filters.date_to {
-        conditions.push("t.date <= ?");
+        conditions.push("t.date <= ?".to_string());
         params.push(Box::new(dt.clone()));
     }
-    if let Some(cat) = &filters.category {
+    if let Some(ref cat) = filters.category {
         if !cat.is_empty() {
-            conditions.push("LOWER(t.category) LIKE LOWER(?)");
+            conditions.push("LOWER(t.category) LIKE LOWER(?)".to_string());
             params.push(Box::new(format!("%{cat}%")));
         }
     }
-    if let Some(ref k) = filters.kind {
-        conditions.push("t.type = ?");
-        params.push(Box::new(k.clone()));
+    if let Some(ref kinds) = filters.kinds {
+        if !kinds.is_empty() {
+            let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+            conditions.push(format!("t.type IN ({placeholders})"));
+            for k in kinds {
+                params.push(Box::new(k.clone()));
+            }
+        }
     }
 
-    let where_clause = if conditions.is_empty() {
+    let clause = if conditions.is_empty() {
         String::new()
     } else {
         format!("WHERE {}", conditions.join(" AND "))
     };
+    (clause, params)
+}
 
-    let sql = format!(
+fn query_transaction_page(conn: &Connection, filters: &TransactionFilters) -> Result<TransactionPage> {
+    let (where_clause, count_params) = build_where(filters);
+    let (_, row_params) = build_where(filters);
+
+    let count_sql = format!(
+        "SELECT COUNT(*) \
+         FROM transactions t \
+         JOIN statements s ON t.statement_id = s.id \
+         JOIN accounts a ON s.account_id = a.id \
+         {where_clause}"
+    );
+    let count_refs: Vec<&dyn ToSql> = count_params.iter().map(|p| p.as_ref()).collect();
+    let total: i64 = conn.query_row(&count_sql, count_refs.as_slice(), |r| r.get(0))?;
+
+    let rows_sql = format!(
         "SELECT t.id, t.date, t.description, t.category, t.amount, t.type, \
                 a.id, a.institution, a.account_number_last4 \
          FROM transactions t \
          JOIN statements s ON t.statement_id = s.id \
          JOIN accounts a ON s.account_id = a.id \
          {where_clause} \
-         ORDER BY t.date DESC, t.id DESC"
+         ORDER BY t.date DESC, t.id DESC \
+         LIMIT ? OFFSET ?"
     );
+    let mut row_refs: Vec<&dyn ToSql> = row_params.iter().map(|p| p.as_ref()).collect();
+    let limit = filters.limit;
+    let offset = filters.offset;
+    row_refs.push(&limit);
+    row_refs.push(&offset);
 
-    let param_refs: Vec<&dyn ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = conn.prepare(&rows_sql)?;
     let rows: Vec<TransactionRow> = stmt
-        .query_map(param_refs.as_slice(), |r| {
+        .query_map(row_refs.as_slice(), |r| {
             Ok(TransactionRow {
                 id: r.get(0)?,
                 date: r.get(1)?,
@@ -88,17 +124,17 @@ fn query_transactions(conn: &Connection, filters: &TransactionFilters) -> Result
         .filter_map(|r| r.ok())
         .collect();
 
-    Ok(rows)
+    Ok(TransactionPage { rows, total })
 }
 
-fn do_get_transactions(db_path: &Path, filters: TransactionFilters) -> Result<Vec<TransactionRow>> {
+fn do_get_transactions(db_path: &Path, filters: TransactionFilters) -> Result<TransactionPage> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(db_path)?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    query_transactions(&conn, &filters)
+    query_transaction_page(&conn, &filters)
 }
 
 #[tauri::command]
@@ -106,7 +142,7 @@ pub async fn get_transactions(
     _app: AppHandle,
     db: State<'_, crate::DbPath>,
     filters: TransactionFilters,
-) -> Result<Vec<TransactionRow>, String> {
+) -> Result<TransactionPage, String> {
     let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || do_get_transactions(&path, filters))
         .await
@@ -160,14 +196,23 @@ mod tests {
     }
 
     fn no_filters() -> TransactionFilters {
-        TransactionFilters { account_id: None, date_from: None, date_to: None, category: None, kind: None }
+        TransactionFilters {
+            account_id: None,
+            date_from: None,
+            date_to: None,
+            category: None,
+            kinds: None,
+            offset: 0,
+            limit: 1000,
+        }
     }
 
     #[test]
     fn empty_db_returns_empty() {
         let conn = open_test_db();
-        let rows = query_transactions(&conn, &no_filters()).unwrap();
-        assert!(rows.is_empty());
+        let page = query_transaction_page(&conn, &no_filters()).unwrap();
+        assert!(page.rows.is_empty());
+        assert_eq!(page.total, 0);
     }
 
     #[test]
@@ -178,11 +223,11 @@ mod tests {
         seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
         seed_tx(&conn, stmt, "2025-01-15", "Salary", "Income", 3000.0, "credit");
 
-        let rows = query_transactions(&conn, &no_filters()).unwrap();
-        assert_eq!(rows.len(), 2);
-        // sorted by date desc
-        assert_eq!(rows[0].date, "2025-01-15");
-        assert_eq!(rows[1].date, "2025-01-10");
+        let page = query_transaction_page(&conn, &no_filters()).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.rows.len(), 2);
+        assert_eq!(page.rows[0].date, "2025-01-15");
+        assert_eq!(page.rows[1].date, "2025-01-10");
     }
 
     #[test]
@@ -196,9 +241,9 @@ mod tests {
         seed_tx(&conn, stmt_b, "2025-01-11", "Gas", "Auto", 40.0, "debit");
 
         let filters = TransactionFilters { account_id: Some(acct_a), ..no_filters() };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].account_id, acct_a);
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].account_id, acct_a);
     }
 
     #[test]
@@ -215,9 +260,9 @@ mod tests {
             date_to: Some("2025-01-20".to_string()),
             ..no_filters()
         };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].description, "Mid");
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].description, "Mid");
     }
 
     #[test]
@@ -229,23 +274,59 @@ mod tests {
         seed_tx(&conn, stmt, "2025-01-11", "Amazon", "Shopping", 50.0, "debit");
 
         let filters = TransactionFilters { category: Some("food".to_string()), ..no_filters() };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].description, "McDonald's");
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].description, "McDonald's");
     }
 
     #[test]
-    fn filter_by_type() {
+    fn filter_by_kinds_single() {
         let conn = open_test_db();
         let acct = seed_account(&conn, "Bank A", "1111");
         let stmt = seed_statement(&conn, acct, "2025-01");
         seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
         seed_tx(&conn, stmt, "2025-01-11", "Salary", "Income", 3000.0, "credit");
 
-        let filters = TransactionFilters { kind: Some("credit".to_string()), ..no_filters() };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].kind, "credit");
+        let filters = TransactionFilters { kinds: Some(vec!["credit".to_string()]), ..no_filters() };
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].kind, "credit");
+    }
+
+    #[test]
+    fn filter_by_kinds_multiple() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
+        seed_tx(&conn, stmt, "2025-01-11", "Salary", "Income", 3000.0, "credit");
+        seed_tx(&conn, stmt, "2025-01-12", "Transfer Out", "Transfer", 500.0, "transfer");
+
+        let filters = TransactionFilters {
+            kinds: Some(vec!["debit".to_string(), "credit".to_string()]),
+            ..no_filters()
+        };
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.rows.iter().all(|r| r.kind != "transfer"));
+    }
+
+    #[test]
+    fn pagination_offset_and_limit() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        for d in 1..=10u32 {
+            seed_tx(&conn, stmt, &format!("2025-01-{d:02}"), "Tx", "Misc", d as f64, "debit");
+        }
+
+        let filters = TransactionFilters { limit: 3, offset: 2, ..no_filters() };
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 10);  // total reflects all matching rows
+        assert_eq!(page.rows.len(), 3);
+        // sorted date DESC: day 10..1; offset 2 skips 10 and 9, so first row is day 8
+        assert_eq!(page.rows[0].description, "Tx");
+        assert_eq!(page.rows[0].amount, 8.0);
     }
 
     #[test]
@@ -261,13 +342,13 @@ mod tests {
 
         let filters = TransactionFilters {
             account_id: Some(acct_a),
-            kind: Some("debit".to_string()),
+            kinds: Some(vec!["debit".to_string()]),
             ..no_filters()
         };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].description, "Coffee");
-        assert_eq!(rows[0].account_id, acct_a);
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.rows[0].description, "Coffee");
+        assert_eq!(page.rows[0].account_id, acct_a);
     }
 
     #[test]
@@ -277,8 +358,12 @@ mod tests {
         let stmt = seed_statement(&conn, acct, "2025-01");
         seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
 
-        let filters = TransactionFilters { kind: Some("transfer".to_string()), ..no_filters() };
-        let rows = query_transactions(&conn, &filters).unwrap();
-        assert!(rows.is_empty());
+        let filters = TransactionFilters {
+            kinds: Some(vec!["transfer".to_string()]),
+            ..no_filters()
+        };
+        let page = query_transaction_page(&conn, &filters).unwrap();
+        assert_eq!(page.total, 0);
+        assert!(page.rows.is_empty());
     }
 }

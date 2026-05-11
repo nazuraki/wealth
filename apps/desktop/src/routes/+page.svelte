@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import {
     Chart,
     LineController,
@@ -118,12 +118,9 @@
     account_number_last4: string;
   }
 
-  interface TransactionFilters {
-    account_id: number | null;
-    date_from: string | null;
-    date_to: string | null;
-    category: string | null;
-    kind: string | null;
+  interface TransactionPage {
+    rows: Transaction[];
+    total: number;
   }
 
   // ── State ─────────────────────────────────────────────────────────────────────
@@ -145,19 +142,23 @@
   let editingAccountId = $state<number | null>(null);
   let editingName = $state("");
 
-  let transactions = $state<Transaction[]>([]);
-  let txFilters = $state<TransactionFilters>({
-    account_id: null,
-    date_from: null,
-    date_to: null,
-    category: null,
-    kind: null,
-  });
+  const TX_PAGE_SIZE = 100;
+  const TX_MAX_LOADED = 1000;
+
   let txFilterAccount = $state("");
   let txFilterDateFrom = $state("");
   let txFilterDateTo = $state("");
   let txFilterCategory = $state("");
-  let txFilterKind = $state("");
+  let txFilterKinds = $state<string[]>(["debit", "credit"]);
+  let txDateDefaultSet = $state(false);
+
+  let txOffset = $state(0);
+  let txTotal = $state(0);
+  let txLoadedRows = $state<Transaction[]>([]);
+  let txLoading = $state(false);
+  let txRequestId = 0;
+
+  let contentEl = $state<HTMLElement | null>(null);
 
   function focusOnMount(node: HTMLElement) {
     node.focus();
@@ -302,30 +303,99 @@
     }
   }
 
-  async function loadTransactions() {
+  let txFilterParams = $derived({
+    account_id: txFilterAccount ? Number(txFilterAccount) : null,
+    date_from: txFilterDateFrom || null,
+    date_to: txFilterDateTo || null,
+    category: txFilterCategory || null,
+    kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
+  });
+
+  async function loadTxPage(direction: "reset" | "append" | "prepend") {
+    if (txLoading && direction !== "reset") return;
+    txLoading = true;
+    const myId = ++txRequestId;
+
+    let offset = 0;
+    if (direction === "append") offset = txOffset + txLoadedRows.length;
+    else if (direction === "prepend") offset = Math.max(0, txOffset - TX_PAGE_SIZE);
+
     try {
-      transactions = await invoke<Transaction[]>("get_transactions", { filters: txFilters });
+      const page = await invoke<TransactionPage>("get_transactions", {
+        filters: { ...txFilterParams, offset, limit: TX_PAGE_SIZE },
+      });
+      if (myId !== txRequestId) return;
+
+      txTotal = page.total;
+
+      if (direction === "reset") {
+        txOffset = 0;
+        txLoadedRows = page.rows;
+      } else if (direction === "append") {
+        const combined = [...txLoadedRows, ...page.rows];
+        if (combined.length > TX_MAX_LOADED) {
+          const drop = combined.length - TX_MAX_LOADED;
+          txOffset += drop;
+          txLoadedRows = combined.slice(drop);
+        } else {
+          txLoadedRows = combined;
+        }
+      } else {
+        const prevScrollHeight = contentEl?.scrollHeight ?? 0;
+        const prevScrollTop = contentEl?.scrollTop ?? 0;
+        const combined = [...page.rows, ...txLoadedRows];
+        txOffset = offset;
+        txLoadedRows = combined.length > TX_MAX_LOADED ? combined.slice(0, TX_MAX_LOADED) : combined;
+        await tick();
+        if (contentEl && myId === txRequestId) {
+          contentEl.scrollTop = prevScrollTop + (contentEl.scrollHeight - prevScrollHeight);
+        }
+      }
     } catch {
-      transactions = [];
+      if (myId === txRequestId && direction === "reset") txLoadedRows = [];
+    } finally {
+      if (myId === txRequestId) txLoading = false;
     }
   }
 
+  // Set default date range to latest statement month once periods are available
   $effect(() => {
-    txFilters = {
-      account_id: txFilterAccount ? Number(txFilterAccount) : null,
-      date_from: txFilterDateFrom || null,
-      date_to: txFilterDateTo || null,
-      category: txFilterCategory || null,
-      kind: txFilterKind || null,
-    };
+    if (availablePeriods.length > 0 && !txDateDefaultSet) {
+      const latest = availablePeriods[availablePeriods.length - 1];
+      const [y, m] = latest.split("-").map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      txFilterDateFrom = `${y}-${String(m).padStart(2, "0")}-01`;
+      txFilterDateTo = `${y}-${String(m).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
+      txDateDefaultSet = true;
+    }
   });
 
+  // Reload when navigating to transactions or when any filter changes
   $effect(() => {
-    if (activeView === "transactions") {
-      // re-run whenever txFilters changes
-      void txFilters;
-      loadTransactions();
+    if (activeView !== "transactions") return;
+    const _p = txFilterParams; // establish dependency
+    txOffset = 0;
+    txLoadedRows = [];
+    txTotal = 0;
+    loadTxPage("reset");
+  });
+
+  // Scroll-based pagination: append when near bottom, prepend when near top
+  $effect(() => {
+    if (activeView !== "transactions" || !contentEl) return;
+    function onScroll() {
+      if (txLoading) return;
+      const el = contentEl!;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 300;
+      const nearTop = el.scrollTop < 300 && txOffset > 0;
+      if (nearBottom) {
+        if (txOffset + txLoadedRows.length < txTotal) loadTxPage("append");
+      } else if (nearTop) {
+        loadTxPage("prepend");
+      }
     }
+    contentEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => contentEl!.removeEventListener("scroll", onScroll);
   });
 
   async function loadSettings() {
@@ -630,7 +700,7 @@
     {/each}
   </nav>
 
-  <main class="content">
+  <main class="content" bind:this={contentEl}>
     {#if pageState === "initializing"}
       <div class="center-frame">
         <div class="spinner" aria-label="Loading…"></div>
@@ -829,18 +899,39 @@
                 bind:value={txFilterCategory}
                 aria-label="Filter by category"
               />
-              <select
-                class="filter-select"
-                bind:value={txFilterKind}
-                aria-label="Filter by type"
-              >
-                <option value="">All types</option>
-                <option value="debit">Debit</option>
-                <option value="credit">Credit</option>
-                <option value="transfer">Transfer</option>
-              </select>
+              <fieldset class="filter-kinds" aria-label="Transaction type">
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="debit" />
+                  Debit
+                </label>
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="credit" />
+                  Credit
+                </label>
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="transfer" />
+                  Transfer
+                </label>
+              </fieldset>
             </div>
-            {#if transactions.length === 0}
+            <div class="tx-count-row">
+              {#if txLoading && txLoadedRows.length === 0}
+                <span class="hint">Loading…</span>
+              {:else}
+                <span class="hint">
+                  Found {txTotal.toLocaleString()} transaction{txTotal === 1 ? "" : "s"}
+                  {#if txOffset > 0 || txOffset + txLoadedRows.length < txTotal}
+                    <span class="tx-window-hint">
+                      (showing {(txOffset + 1).toLocaleString()}–{(txOffset + txLoadedRows.length).toLocaleString()})
+                    </span>
+                  {/if}
+                </span>
+                {#if txLoading}
+                  <span class="tx-loading-inline">Loading…</span>
+                {/if}
+              {/if}
+            </div>
+            {#if txLoadedRows.length === 0 && !txLoading}
               <div class="tx-empty">
                 <p class="hint">No transactions match the current filters.</p>
               </div>
@@ -856,14 +947,14 @@
                   </tr>
                 </thead>
                 <tbody>
-                  {#each transactions as tx (tx.id)}
+                  {#each txLoadedRows as tx (tx.id)}
                     <tr>
                       <td class="tx-date">{tx.date}</td>
                       <td class="tx-desc">{tx.description}</td>
                       <td class="tx-cat">{tx.category}</td>
                       <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
                       <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
-                        {tx.kind === "debit" ? "-" : "+"}{fmt(tx.amount)}
+                        {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
                       </td>
                     </tr>
                   {/each}
@@ -1671,8 +1762,9 @@
   .tx-filters {
     display: flex;
     flex-wrap: wrap;
+    align-items: center;
     gap: 0.5rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0.75rem;
   }
 
   .filter-select,
@@ -1697,6 +1789,48 @@
       border-color: #444;
       color: #f6f6f6;
     }
+  }
+
+  .filter-kinds {
+    all: unset;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 0.3em 0.7em;
+    font-size: 0.85rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .filter-kinds {
+      border-color: #444;
+    }
+  }
+
+  .kind-label {
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .tx-count-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    min-height: 1.4rem;
+  }
+
+  .tx-window-hint {
+    color: #aaa;
+  }
+
+  .tx-loading-inline {
+    font-size: 0.8rem;
+    color: #888;
   }
 
   .tx-table {
