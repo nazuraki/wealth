@@ -51,4 +51,4 @@ fresh: clean install
 
 # Re-index this project in nazu's code graph
 index:
-    node /Users/nazuraki/src/nazu/apps/indexer/dist/cli.js --path . --graph code:wealth
+    nazu-index --path . --graph code:wealth
