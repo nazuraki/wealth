@@ -55,17 +55,18 @@ just build
 
 ## Demo mode
 
-`demo.db` in the repo root contains pre-populated fake data (3 accounts, 13 months of statements, ~970 transactions). Launch the app against it with the `--db` flag:
+`demo.db` in the repo root contains pre-populated fake data (3 accounts, 13 months of statements, ~970 transactions). Launch the app against it:
 
 ```sh
 # dev
-cd apps/desktop && npm run tauri dev -- -- --db ../../demo.db
+just demo
 
-# production build
+# production build — pass --db or set WEALTH_DB
 wealth --db /path/to/demo.db
+WEALTH_DB=/path/to/demo.db wealth
 ```
 
-The flag overrides the default database location (`~/.local/share/wealth/wealth.db` on Linux, `~/Library/Application Support/com.wealth.app/wealth.db` on macOS).
+The `--db` flag (or `WEALTH_DB` env var) overrides the default database location (`~/.local/share/wealth/wealth.db` on Linux, `~/Library/Application Support/com.wealth.app/wealth.db` on macOS).
 
 ## Further reading
 

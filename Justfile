@@ -12,6 +12,10 @@ install:
 dev:
     cd apps/desktop && npm run tauri dev
 
+# Run desktop app in dev mode with demo database
+demo:
+    cd apps/desktop && WEALTH_DB={{justfile_directory()}}/demo.db npm run tauri dev
+
 # Run desktop app (dev mode)
 run: dev
 
@@ -44,3 +48,7 @@ clean:
 
 # Reinstall from scratch
 fresh: clean install
+
+# Re-index this project in nazu's code graph
+index:
+    node /Users/nazuraki/src/nazu/apps/indexer/dist/cli.js --path . --graph code:wealth

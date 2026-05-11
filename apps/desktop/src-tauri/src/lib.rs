@@ -59,6 +59,7 @@ pub fn run() {
                 .position(|a| a == "--db")
                 .and_then(|i| std::env::args().nth(i + 1))
                 .map(PathBuf::from)
+                .or_else(|| std::env::var("WEALTH_DB").ok().map(PathBuf::from))
                 .unwrap_or_else(|| data_dir.join("wealth.db"));
             app.manage(DbPath(db_path));
 
