@@ -150,7 +150,6 @@
   let txFilterDateTo = $state("");
   let txFilterCategory = $state("");
   let txFilterKinds = $state<string[]>(["debit", "credit"]);
-  let txDateDefaultSet = $state(false);
 
   let txOffset = $state(0);
   let txTotal = $state(0);
@@ -351,7 +350,8 @@
           contentEl.scrollTop = prevScrollTop + (contentEl.scrollHeight - prevScrollHeight);
         }
       }
-    } catch {
+    } catch (err) {
+      console.error("get_transactions failed:", err);
       if (myId === txRequestId && direction === "reset") txLoadedRows = [];
     } finally {
       if (myId === txRequestId) txLoading = false;
@@ -364,20 +364,6 @@
     txTotal = 0;
     loadTxPage("reset");
   }
-
-  // Set default date range to latest statement month once periods are available.
-  // If we're already on the transactions view when this fires, reload with the new dates.
-  $effect(() => {
-    if (availablePeriods.length > 0 && !txDateDefaultSet) {
-      const latest = availablePeriods[availablePeriods.length - 1];
-      const [y, m] = latest.split("-").map(Number);
-      const lastDay = new Date(y, m, 0).getDate();
-      txFilterDateFrom = `${y}-${String(m).padStart(2, "0")}-01`;
-      txFilterDateTo = `${y}-${String(m).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
-      txDateDefaultSet = true;
-      if (activeView === "transactions") untrack(resetAndLoadTransactions);
-    }
-  });
 
   // Scroll-based pagination: append when near bottom, prepend when near top
   $effect(() => {
@@ -884,16 +870,16 @@
               <input
                 type="date"
                 class="filter-input"
-                bind:value={txFilterDateFrom}
-                onchange={resetAndLoadTransactions}
+                value={txFilterDateFrom}
+                oninput={(e) => { txFilterDateFrom = (e.currentTarget as HTMLInputElement).value; resetAndLoadTransactions(); }}
                 aria-label="Date from"
                 title="From date"
               />
               <input
                 type="date"
                 class="filter-input"
-                bind:value={txFilterDateTo}
-                onchange={resetAndLoadTransactions}
+                value={txFilterDateTo}
+                oninput={(e) => { txFilterDateTo = (e.currentTarget as HTMLInputElement).value; resetAndLoadTransactions(); }}
                 aria-label="Date to"
                 title="To date"
               />
