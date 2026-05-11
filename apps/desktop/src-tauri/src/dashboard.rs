@@ -1,7 +1,8 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use std::path::Path;
+use tauri::{AppHandle, State};
 
 #[derive(Debug, Serialize)]
 pub struct AccountBalance {
@@ -105,19 +106,20 @@ fn query_dashboard(conn: &Connection) -> Result<Option<DashboardData>> {
     }))
 }
 
-fn do_get_dashboard(app: &AppHandle) -> Result<Option<DashboardData>> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("wealth.db");
-    let conn = Connection::open(&db_path)?;
+fn do_get_dashboard(db_path: &Path) -> Result<Option<DashboardData>> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     query_dashboard(&conn)
 }
 
 #[tauri::command]
-pub async fn get_dashboard(app: AppHandle) -> Result<Option<DashboardData>, String> {
-    tauri::async_runtime::spawn_blocking(move || do_get_dashboard(&app))
+pub async fn get_dashboard(_app: AppHandle, db: State<'_, crate::DbPath>) -> Result<Option<DashboardData>, String> {
+    let path = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || do_get_dashboard(&path))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())

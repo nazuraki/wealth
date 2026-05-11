@@ -4,8 +4,13 @@ mod dashboard;
 mod importer;
 mod settings;
 
+use std::path::PathBuf;
 use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
+
+/// Resolved path to the SQLite database file, stored as Tauri app state.
+/// Populated during setup from `--db <path>`, `WEALTH_DB` env var, or the default app-data directory.
+pub struct DbPath(pub PathBuf);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -49,6 +54,15 @@ pub fn run() {
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+
+            let db_path = std::env::args()
+                .position(|a| a == "--db")
+                .and_then(|i| std::env::args().nth(i + 1))
+                .map(PathBuf::from)
+                .or_else(|| std::env::var("WEALTH_DB").ok().map(PathBuf::from))
+                .unwrap_or_else(|| data_dir.join("wealth.db"));
+            app.manage(DbPath(db_path));
+
             let s = settings::load(&data_dir);
 
             if let Some(win) = app.get_webview_window("main") {

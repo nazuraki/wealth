@@ -6,7 +6,7 @@ use extractor::{
 use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, State};
 
 #[derive(Debug, Serialize)]
 pub struct ImportSummary {
@@ -125,11 +125,9 @@ pub(crate) fn write_to_db(
 
 // ── Tauri command ─────────────────────────────────────────────────────────────
 
-fn do_import(app: &AppHandle, path: &str) -> Result<Vec<ImportSummary>> {
+fn do_import(app: &AppHandle, db_path: PathBuf, path: &str) -> Result<Vec<ImportSummary>> {
     let pdf_path = PathBuf::from(path);
     let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("wealth.db");
 
     let s = crate::settings::load(&data_dir);
     let api_key = s
@@ -153,8 +151,9 @@ fn do_import(app: &AppHandle, path: &str) -> Result<Vec<ImportSummary>> {
 }
 
 #[tauri::command]
-pub async fn import_statement(app: AppHandle, path: String) -> Result<Vec<ImportSummary>, String> {
-    tauri::async_runtime::spawn_blocking(move || do_import(&app, &path))
+pub async fn import_statement(app: AppHandle, db: State<'_, crate::DbPath>, path: String) -> Result<Vec<ImportSummary>, String> {
+    let db_path = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || do_import(&app, db_path, &path))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
