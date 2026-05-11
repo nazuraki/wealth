@@ -9,7 +9,7 @@ use tauri::Manager;
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 /// Resolved path to the SQLite database file, stored as Tauri app state.
-/// Populated during setup from `--db <path>` or the default app-data directory.
+/// Populated during setup from `--db <path>`, `WEALTH_DB` env var, or the default app-data directory.
 pub struct DbPath(pub PathBuf);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
