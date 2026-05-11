@@ -1,7 +1,8 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use std::path::Path;
+use tauri::{AppHandle, State};
 
 #[derive(Debug, Serialize)]
 pub struct Account {
@@ -15,10 +16,11 @@ pub struct Account {
     pub statement_period: Option<String>,
 }
 
-fn open_conn(app: &AppHandle) -> Result<Connection> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    let conn = Connection::open(data_dir.join("wealth.db"))?;
+fn open_conn(db_path: &Path) -> Result<Connection> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(conn)
@@ -68,9 +70,10 @@ fn do_update_account(
 }
 
 #[tauri::command]
-pub async fn get_accounts(app: AppHandle) -> Result<Vec<Account>, String> {
+pub async fn get_accounts(_app: AppHandle, db: State<'_, crate::DbPath>) -> Result<Vec<Account>, String> {
+    let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_conn(&app)?;
+        let conn = open_conn(&path)?;
         query_accounts(&conn)
     })
     .await
@@ -80,13 +83,15 @@ pub async fn get_accounts(app: AppHandle) -> Result<Vec<Account>, String> {
 
 #[tauri::command]
 pub async fn update_account(
-    app: AppHandle,
+    _app: AppHandle,
+    db: State<'_, crate::DbPath>,
     id: i64,
     display_name: Option<String>,
     color: Option<String>,
 ) -> Result<(), String> {
+    let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_conn(&app)?;
+        let conn = open_conn(&path)?;
         do_update_account(&conn, id, display_name, color)
     })
     .await

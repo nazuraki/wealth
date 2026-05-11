@@ -1,7 +1,8 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use tauri::{AppHandle, Manager};
+use std::path::Path;
+use tauri::{AppHandle, State};
 
 #[derive(Debug, Serialize)]
 pub struct BalancePoint {
@@ -119,19 +120,21 @@ fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<Ch
     }))
 }
 
-fn open_conn(app: &AppHandle) -> Result<Connection> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
-    let conn = Connection::open(data_dir.join("wealth.db"))?;
+fn open_conn(db_path: &Path) -> Result<Connection> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(conn)
 }
 
 #[tauri::command]
-pub async fn get_available_periods(app: AppHandle) -> Result<Vec<String>, String> {
+pub async fn get_available_periods(_app: AppHandle, db: State<'_, crate::DbPath>) -> Result<Vec<String>, String> {
+    let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_conn(&app)?;
+        let conn = open_conn(&path)?;
         query_available_periods(&conn)
     })
     .await
@@ -140,9 +143,10 @@ pub async fn get_available_periods(app: AppHandle) -> Result<Vec<String>, String
 }
 
 #[tauri::command]
-pub async fn get_chart_data(app: AppHandle, from: String, to: String) -> Result<Option<ChartData>, String> {
+pub async fn get_chart_data(_app: AppHandle, db: State<'_, crate::DbPath>, from: String, to: String) -> Result<Option<ChartData>, String> {
+    let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_conn(&app)?;
+        let conn = open_conn(&path)?;
         query_chart_data(&conn, &from, &to)
     })
     .await
