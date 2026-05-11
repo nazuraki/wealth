@@ -3,6 +3,7 @@ pub const MIGRATION_002: &str = include_str!("../migrations/002_account_type.sql
 pub const MIGRATION_003: &str = include_str!("../migrations/003_normalize_periods.sql");
 pub const MIGRATION_004: &str = include_str!("../migrations/004_dedupe_accounts.sql");
 pub const MIGRATION_005: &str = include_str!("../migrations/005_account_display.sql");
+pub const MIGRATION_006: &str = include_str!("../migrations/006_transfer_type.sql");
 
 /// Apply all migrations in order. Idempotent: safe to call on every connection open.
 pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -25,5 +26,8 @@ pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
             Err(e) => return Err(e),
         }
     }
+    // Migration 006 rebuilds transactions to allow type = 'transfer'. The rebuild is idempotent:
+    // data is copied into transactions_v2 before the old table is dropped, so re-running is safe.
+    conn.execute_batch(MIGRATION_006)?;
     Ok(())
 }

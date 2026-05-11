@@ -100,6 +100,7 @@ fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<Ch
                 COALESCE(SUM(CASE WHEN t.type = 'debit'  THEN t.amount ELSE 0.0 END), 0.0) \
          FROM transactions t \
          WHERE strftime('%Y-%m', t.date) >= ?1 AND strftime('%Y-%m', t.date) <= ?2 \
+           AND t.type != 'transfer' \
          GROUP BY month \
          ORDER BY month",
     )?;
@@ -263,6 +264,23 @@ mod tests {
         assert_eq!(data.monthly_flows.len(), 1);
         assert_eq!(data.monthly_flows[0].income, 3000.0);
         assert_eq!(data.monthly_flows[0].spend, 500.0);
+    }
+
+    #[test]
+    fn monthly_flows_excludes_transfers() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Transfer Bank", "9000", Some("checking"));
+        let period = sqlite_period(&conn, "-1 month");
+        let stmt = seed_statement(&conn, acct, &period, None);
+        let recent = sqlite_date(&conn, "-20 days");
+        seed_transaction(&conn, stmt, &recent, 3000.0, "credit");
+        seed_transaction(&conn, stmt, &recent, 500.0, "debit");
+        seed_transaction(&conn, stmt, &recent, 1000.0, "transfer");
+
+        let data = query_chart_data(&conn, &period, &period).unwrap().unwrap();
+        assert_eq!(data.monthly_flows.len(), 1);
+        assert_eq!(data.monthly_flows[0].income, 3000.0, "transfer credit must not inflate income");
+        assert_eq!(data.monthly_flows[0].spend, 500.0, "transfer debit must not inflate spend");
     }
 
     #[test]

@@ -3,7 +3,7 @@ use rusqlite::Connection;
 fn open() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-    conn.execute_batch(db::MIGRATION_001).unwrap();
+    db::run_migrations(&conn).unwrap();
     conn
 }
 
@@ -58,6 +58,12 @@ fn enforces_transaction_type_check() {
         [],
     );
     assert!(ok.is_ok());
+
+    let transfer = conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, category, amount, type) VALUES (1, '2024-01-01', 'Test', 'Misc', 10.0, 'transfer')",
+        [],
+    );
+    assert!(transfer.is_ok(), "type = 'transfer' should be accepted");
 
     let bad = conn.execute(
         "INSERT INTO transactions (statement_id, date, description, category, amount, type) VALUES (1, '2024-01-01', 'Test', 'Misc', 10.0, 'invalid')",
