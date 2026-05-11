@@ -53,6 +53,20 @@ node src/index.js path/to/statement.pdf
 just build
 ```
 
+## Demo mode
+
+`demo.db` in the repo root contains pre-populated fake data (3 accounts, 13 months of statements, ~970 transactions). Launch the app against it with the `--db` flag:
+
+```sh
+# dev
+cd apps/desktop && npm run tauri dev -- -- --db ../../demo.db
+
+# production build
+wealth --db /path/to/demo.db
+```
+
+The flag overrides the default database location (`~/.local/share/wealth/wealth.db` on Linux, `~/Library/Application Support/com.wealth.app/wealth.db` on macOS).
+
 ## Further reading
 
 See [docs/PURPOSE.md](docs/PURPOSE.md) for goals, non-goals, and intended audience.
