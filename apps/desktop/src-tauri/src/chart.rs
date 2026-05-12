@@ -100,7 +100,7 @@ fn query_chart_data(conn: &Connection, from: &str, to: &str) -> Result<Option<Ch
                 COALESCE(SUM(CASE WHEN t.type = 'debit'  THEN t.amount ELSE 0.0 END), 0.0) \
          FROM transactions t \
          WHERE strftime('%Y-%m', t.date) >= ?1 AND strftime('%Y-%m', t.date) <= ?2 \
-           AND t.type != 'transfer' \
+           AND t.is_transfer = 0 \
          GROUP BY month \
          ORDER BY month",
     )?;
@@ -191,10 +191,12 @@ mod tests {
     }
 
     fn seed_transaction(conn: &Connection, stmt_id: i64, date: &str, amount: f64, kind: &str) {
+        let is_transfer: i64 = if kind == "transfer" { 1 } else { 0 };
+        let actual_kind = if kind == "transfer" { "debit" } else { kind };
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, category, amount, type) \
-             VALUES (?1, ?2, 'test', 'test', ?3, ?4)",
-            params![stmt_id, date, amount, kind],
+            "INSERT INTO transactions (statement_id, date, description, category, amount, type, is_transfer) \
+             VALUES (?1, ?2, 'test', 'test', ?3, ?4, ?5)",
+            params![stmt_id, date, amount, actual_kind, is_transfer],
         )
         .unwrap();
     }

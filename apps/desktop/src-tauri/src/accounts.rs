@@ -61,10 +61,40 @@ fn do_update_account(
     id: i64,
     display_name: Option<String>,
     color: Option<String>,
+    account_number_last4: Option<String>,
 ) -> Result<()> {
+    if let Some(ref num) = account_number_last4 {
+        conn.execute(
+            "UPDATE accounts SET display_name = ?1, color = ?2, account_number_last4 = ?3 WHERE id = ?4",
+            params![display_name, color, num, id],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE accounts SET display_name = ?1, color = ?2 WHERE id = ?3",
+            params![display_name, color, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn do_merge_accounts(conn: &Connection, source_id: i64, target_id: i64) -> Result<()> {
+    let conflicts: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM statements s1 \
+         JOIN statements s2 ON s2.account_id = ?2 AND s2.statement_period = s1.statement_period \
+         WHERE s1.account_id = ?1",
+        params![source_id, target_id],
+        |r| r.get(0),
+    )?;
+    if conflicts > 0 {
+        anyhow::bail!("Cannot merge: {} overlapping statement period(s) between accounts", conflicts);
+    }
     conn.execute(
-        "UPDATE accounts SET display_name = ?1, color = ?2 WHERE id = ?3",
-        params![display_name, color, id],
+        "UPDATE statements SET account_id = ?1 WHERE account_id = ?2",
+        params![target_id, source_id],
+    )?;
+    conn.execute(
+        "DELETE FROM accounts WHERE id = ?1",
+        params![source_id],
     )?;
     Ok(())
 }
@@ -88,11 +118,29 @@ pub async fn update_account(
     id: i64,
     display_name: Option<String>,
     color: Option<String>,
+    account_number_last4: Option<String>,
 ) -> Result<(), String> {
     let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_conn(&path)?;
-        do_update_account(&conn, id, display_name, color)
+        do_update_account(&conn, id, display_name, color, account_number_last4)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn merge_accounts(
+    _app: AppHandle,
+    db: State<'_, crate::DbPath>,
+    source_id: i64,
+    target_id: i64,
+) -> Result<(), String> {
+    let path = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_conn(&path)?;
+        do_merge_accounts(&conn, source_id, target_id)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -155,7 +203,7 @@ mod tests {
         let conn = open_test_db();
         let id = seed_account(&conn, "Big Bank", "5678");
 
-        do_update_account(&conn, id, Some("My Checking".to_string()), Some("#ff0000".to_string())).unwrap();
+        do_update_account(&conn, id, Some("My Checking".to_string()), Some("#ff0000".to_string()), None).unwrap();
 
         let accounts = query_accounts(&conn).unwrap();
         assert_eq!(accounts[0].display_name, Some("My Checking".to_string()));
@@ -166,8 +214,8 @@ mod tests {
     fn update_account_can_clear_fields() {
         let conn = open_test_db();
         let id = seed_account(&conn, "Clear Bank", "0000");
-        do_update_account(&conn, id, Some("Name".to_string()), Some("#abc".to_string())).unwrap();
-        do_update_account(&conn, id, None, None).unwrap();
+        do_update_account(&conn, id, Some("Name".to_string()), Some("#abc".to_string()), None).unwrap();
+        do_update_account(&conn, id, None, None, None).unwrap();
 
         let accounts = query_accounts(&conn).unwrap();
         assert!(accounts[0].display_name.is_none());

@@ -12,6 +12,7 @@ pub struct TransactionRow {
     pub category: String,
     pub amount: f64,
     pub kind: String,
+    pub is_transfer: bool,
     pub account_id: i64,
     pub institution: String,
     pub account_number_last4: String,
@@ -60,10 +61,21 @@ fn build_where(filters: &TransactionFilters) -> (String, Vec<Box<dyn ToSql>>) {
     }
     if let Some(ref kinds) = filters.kinds {
         if !kinds.is_empty() {
-            let placeholders = kinds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-            conditions.push(format!("t.type IN ({placeholders})"));
-            for k in kinds {
-                params.push(Box::new(k.clone()));
+            let has_transfer = kinds.iter().any(|k| k == "transfer");
+            let non_transfer: Vec<&String> = kinds.iter().filter(|k| k.as_str() != "transfer").collect();
+            let mut sub: Vec<String> = vec![];
+            if has_transfer {
+                sub.push("t.is_transfer = 1".to_string());
+            }
+            if !non_transfer.is_empty() {
+                let ph = non_transfer.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                sub.push(format!("(t.is_transfer = 0 AND t.type IN ({ph}))"));
+                for k in non_transfer {
+                    params.push(Box::new(k.clone()));
+                }
+            }
+            if !sub.is_empty() {
+                conditions.push(format!("({})", sub.join(" OR ")));
             }
         }
     }
@@ -91,7 +103,7 @@ fn query_transaction_page(conn: &Connection, filters: &TransactionFilters) -> Re
     let total: i64 = conn.query_row(&count_sql, count_refs.as_slice(), |r| r.get(0))?;
 
     let rows_sql = format!(
-        "SELECT t.id, t.date, t.description, t.category, t.amount, t.type, \
+        "SELECT t.id, t.date, t.description, t.category, t.amount, t.type, t.is_transfer, \
                 a.id, a.institution, a.account_number_last4 \
          FROM transactions t \
          JOIN statements s ON t.statement_id = s.id \
@@ -116,9 +128,10 @@ fn query_transaction_page(conn: &Connection, filters: &TransactionFilters) -> Re
                 category: r.get(3)?,
                 amount: r.get(4)?,
                 kind: r.get(5)?,
-                account_id: r.get(6)?,
-                institution: r.get(7)?,
-                account_number_last4: r.get(8)?,
+                is_transfer: r.get::<_, i64>(6)? != 0,
+                account_id: r.get(7)?,
+                institution: r.get(8)?,
+                account_number_last4: r.get(9)?,
             })
         })?
         .filter_map(|r| r.ok())
@@ -150,8 +163,8 @@ pub async fn get_transactions(
         .map_err(|e| e.to_string())
 }
 
-fn do_update_transaction(db_path: &Path, id: i64, description: String, category: String, kind: String) -> Result<()> {
-    if !matches!(kind.as_str(), "debit" | "credit" | "transfer") {
+fn do_update_transaction(db_path: &Path, id: i64, description: String, category: String, kind: String, is_transfer: bool) -> Result<()> {
+    if !matches!(kind.as_str(), "debit" | "credit") {
         anyhow::bail!("invalid transaction type: {kind}");
     }
     if let Some(parent) = db_path.parent() {
@@ -161,8 +174,8 @@ fn do_update_transaction(db_path: &Path, id: i64, description: String, category:
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute(
-        "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
-        params![description, category, kind, id],
+        "UPDATE transactions SET description = ?1, category = ?2, type = ?3, is_transfer = ?4 WHERE id = ?5",
+        params![description, category, kind, is_transfer as i64, id],
     )?;
     Ok(())
 }
@@ -175,9 +188,10 @@ pub async fn update_transaction(
     description: String,
     category: String,
     kind: String,
+    is_transfer: bool,
 ) -> Result<(), String> {
     let path = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || do_update_transaction(&path, id, description, category, kind))
+    tauri::async_runtime::spawn_blocking(move || do_update_transaction(&path, id, description, category, kind, is_transfer))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
@@ -248,8 +262,18 @@ mod tests {
 
     fn seed_tx(conn: &Connection, stmt_id: i64, date: &str, desc: &str, category: &str, amount: f64, kind: &str) -> i64 {
         conn.execute(
-            "INSERT INTO transactions (statement_id, date, description, category, amount, type) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO transactions (statement_id, date, description, category, amount, type, is_transfer) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+            params![stmt_id, date, desc, category, amount, kind],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_transfer_tx(conn: &Connection, stmt_id: i64, date: &str, desc: &str, category: &str, amount: f64, kind: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO transactions (statement_id, date, description, category, amount, type, is_transfer) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
             params![stmt_id, date, desc, category, amount, kind],
         )
         .unwrap();
@@ -361,7 +385,7 @@ mod tests {
         let stmt = seed_statement(&conn, acct, "2025-01");
         seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
         seed_tx(&conn, stmt, "2025-01-11", "Salary", "Income", 3000.0, "credit");
-        seed_tx(&conn, stmt, "2025-01-12", "Transfer Out", "Transfer", 500.0, "transfer");
+        seed_transfer_tx(&conn, stmt, "2025-01-12", "Transfer Out", "Transfer", 500.0, "debit");
 
         let filters = TransactionFilters {
             kinds: Some(vec!["debit".to_string(), "credit".to_string()]),
@@ -369,7 +393,7 @@ mod tests {
         };
         let page = query_transaction_page(&conn, &filters).unwrap();
         assert_eq!(page.total, 2);
-        assert!(page.rows.iter().all(|r| r.kind != "transfer"));
+        assert!(page.rows.iter().all(|r| !r.is_transfer));
     }
 
     #[test]
@@ -419,6 +443,7 @@ mod tests {
         let stmt = seed_statement(&conn, acct, "2025-01");
         seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
 
+        // Filter for is_transfer=1 — the seeded transaction is not a transfer, so none match
         let filters = TransactionFilters {
             kinds: Some(vec!["transfer".to_string()]),
             ..no_filters()
@@ -428,11 +453,11 @@ mod tests {
         assert!(page.rows.is_empty());
     }
 
-    fn query_tx(conn: &Connection, id: i64) -> (String, String, String) {
+    fn query_tx(conn: &Connection, id: i64) -> (String, String, String, bool) {
         conn.query_row(
-            "SELECT description, category, type FROM transactions WHERE id = ?1",
+            "SELECT description, category, type, is_transfer FROM transactions WHERE id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0)),
         )
         .unwrap()
     }
@@ -455,32 +480,34 @@ mod tests {
         let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
 
         conn.execute(
-            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3, is_transfer = 0 WHERE id = ?4",
             params!["Espresso", "Dining", "debit", tx_id],
         )
         .unwrap();
 
-        let (desc, cat, kind) = query_tx(&conn, tx_id);
+        let (desc, cat, kind, is_transfer) = query_tx(&conn, tx_id);
         assert_eq!(desc, "Espresso");
         assert_eq!(cat, "Dining");
         assert_eq!(kind, "debit");
+        assert!(!is_transfer);
     }
 
     #[test]
-    fn update_transaction_can_change_kind_to_transfer() {
+    fn update_transaction_can_mark_as_transfer() {
         let conn = open_test_db();
         let acct = seed_account(&conn, "Bank A", "1111");
         let stmt = seed_statement(&conn, acct, "2025-01");
         let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Wire", "Transfer", 500.0, "debit");
 
         conn.execute(
-            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
-            params!["Wire", "Transfer", "transfer", tx_id],
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3, is_transfer = 1 WHERE id = ?4",
+            params!["Wire", "Transfer", "debit", tx_id],
         )
         .unwrap();
 
-        let (_, _, kind) = query_tx(&conn, tx_id);
-        assert_eq!(kind, "transfer");
+        let (_, _, kind, is_transfer) = query_tx(&conn, tx_id);
+        assert_eq!(kind, "debit");
+        assert!(is_transfer);
     }
 
     #[test]
@@ -488,7 +515,7 @@ mod tests {
         let conn = open_test_db();
         let affected = conn
             .execute(
-                "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+                "UPDATE transactions SET description = ?1, category = ?2, type = ?3, is_transfer = 0 WHERE id = ?4",
                 params!["X", "Y", "debit", 9999i64],
             )
             .unwrap();

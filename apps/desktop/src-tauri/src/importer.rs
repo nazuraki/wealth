@@ -159,18 +159,14 @@ fn write_account_to_tx(
 
     if write_transactions {
         let mut stmt = tx.prepare(
-            "INSERT INTO transactions (statement_id, date, description, category, amount, type) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO transactions (statement_id, date, description, category, amount, type, is_transfer) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for t in &extraction.transactions {
-            let kind = if is_transfer(&t.description) {
-                "transfer"
-            } else {
-                match t.transaction_type {
-                    TransactionType::Debit => "debit",
-                    TransactionType::Credit => "credit",
-                    TransactionType::Transfer => "transfer",
-                }
+            let flagged = is_transfer(&t.description) || t.transaction_type == TransactionType::Transfer;
+            let kind = match t.transaction_type {
+                TransactionType::Credit => "credit",
+                _ => "debit",
             };
             stmt.execute(params![
                 statement_id,
@@ -178,7 +174,8 @@ fn write_account_to_tx(
                 t.description,
                 t.category,
                 t.amount,
-                kind
+                kind,
+                flagged as i64
             ])?;
         }
     }
@@ -526,14 +523,15 @@ mod tests {
         write_to_tx(&tx, "test.pdf", &result, false).unwrap();
         tx.commit().unwrap();
 
-        let types: Vec<String> = conn
-            .prepare("SELECT type FROM transactions ORDER BY date")
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT type, is_transfer FROM transactions ORDER BY date")
             .unwrap()
-            .query_map([], |r| r.get(0))
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert_eq!(types, vec!["transfer", "debit"]);
+        // "PAYMENT - THANK YOU" is a credit transfer; "WHOLE FOODS MARKET" is a plain debit
+        assert_eq!(rows, vec![("credit".to_string(), 1), ("debit".to_string(), 0)]);
     }
 
     // ── Conflict detection tests ──────────────────────────────────────────────

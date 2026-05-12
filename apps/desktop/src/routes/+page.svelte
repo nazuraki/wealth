@@ -124,6 +124,7 @@
     category: string;
     amount: number;
     kind: string;
+    is_transfer: boolean;
     account_id: number;
     institution: string;
     account_number_last4: string;
@@ -156,6 +157,11 @@
   let accounts = $state<Account[]>([]);
   let editingAccountId = $state<number | null>(null);
   let editingName = $state("");
+  let editingAccountNumberId = $state<number | null>(null);
+  let editingNumber = $state("");
+  let mergeSourceId = $state<number | null>(null);
+  let mergeTargetId = $state("");
+  let mergeError = $state("");
 
   const TX_PAGE_SIZE = 100;
   const TX_MAX_LOADED = 1000;
@@ -175,7 +181,7 @@
   let editingTxId = $state<number | null>(null);
   let editDesc = $state("");
   let editCat = $state("");
-  let editKind = $state("");
+  let editKind = $state(""); // "debit" | "credit" | "debit-xfer" | "credit-xfer"
   let txCategories = $state<string[]>([]);
 
   let contentEl = $state<HTMLElement | null>(null);
@@ -394,11 +400,20 @@
     }
   }
 
+  // editKind encodes both direction and transfer flag: "debit" | "credit" | "debit-xfer" | "credit-xfer"
+  function kindToEditValue(kind: string, isTransfer: boolean) {
+    return isTransfer ? `${kind}-xfer` : kind;
+  }
+  function editValueToKind(v: string): { kind: string; isTransfer: boolean } {
+    const xfer = v.endsWith("-xfer");
+    return { kind: xfer ? v.slice(0, -5) : v, isTransfer: xfer };
+  }
+
   function startEditTx(tx: Transaction) {
     editingTxId = tx.id;
     editDesc = tx.description;
     editCat = tx.category;
-    editKind = tx.kind;
+    editKind = kindToEditValue(tx.kind, tx.is_transfer);
   }
 
   async function commitEditTx(tx: Transaction) {
@@ -406,22 +421,25 @@
     editingTxId = null;
     const newDesc = editDesc.trim() || tx.description;
     const newCat = editCat.trim() || tx.category;
-    const newKind = editKind || tx.kind;
-    if (newDesc === tx.description && newCat === tx.category && newKind === tx.kind) return;
+    const { kind: newKind, isTransfer: newIsTransfer } = editValueToKind(editKind || kindToEditValue(tx.kind, tx.is_transfer));
+    if (newDesc === tx.description && newCat === tx.category && newKind === tx.kind && newIsTransfer === tx.is_transfer) return;
     const prevDesc = tx.description;
     const prevCat = tx.category;
     const prevKind = tx.kind;
+    const prevIsTransfer = tx.is_transfer;
     tx.description = newDesc;
     tx.category = newCat;
     tx.kind = newKind;
+    tx.is_transfer = newIsTransfer;
     txLoadedRows = [...txLoadedRows];
     try {
-      await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category, kind: tx.kind });
+      await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category, kind: tx.kind, isTransfer: tx.is_transfer });
       loadCategories();
     } catch {
       tx.description = prevDesc;
       tx.category = prevCat;
       tx.kind = prevKind;
+      tx.is_transfer = prevIsTransfer;
       txLoadedRows = [...txLoadedRows];
     }
   }
@@ -542,6 +560,56 @@
       }
     } catch {
       // non-fatal
+    }
+  }
+
+  function startEditNumber(acct: Account) {
+    editingAccountNumberId = acct.id;
+    editingNumber = acct.account_number_last4;
+  }
+
+  async function commitEditNumber(acct: Account) {
+    if (editingAccountNumberId !== acct.id) return;
+    editingAccountNumberId = null;
+    const newNum = editingNumber.trim();
+    if (!newNum || newNum === acct.account_number_last4) return;
+    try {
+      await invoke("update_account", { id: acct.id, displayName: acct.display_name, color: acct.color, accountNumberLast4: newNum });
+      acct.account_number_last4 = newNum;
+      accounts = [...accounts];
+    } catch (e) {
+      editingNumber = acct.account_number_last4;
+      alert(`Could not update account number: ${e}`);
+    }
+  }
+
+  function startMerge(acct: Account) {
+    mergeSourceId = acct.id;
+    mergeTargetId = "";
+    mergeError = "";
+  }
+
+  function cancelMerge() {
+    mergeSourceId = null;
+    mergeTargetId = "";
+    mergeError = "";
+  }
+
+  async function confirmMerge() {
+    if (!mergeTargetId || mergeSourceId === null) return;
+    const targetId = parseInt(mergeTargetId);
+    try {
+      await invoke("merge_accounts", { sourceId: mergeSourceId, targetId });
+      accounts = await invoke<Account[]>("get_accounts");
+      await loadDashboard();
+      if (chartFrom && chartTo) {
+        chartData = await invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo });
+      }
+      mergeSourceId = null;
+      mergeTargetId = "";
+      mergeError = "";
+    } catch (e) {
+      mergeError = String(e);
     }
   }
 
@@ -940,7 +1008,15 @@
                           {acct.display_name ?? acct.institution}
                         </button>
                       {/if}
-                      <span class="account-sub">···{acct.account_number_last4}{acct.account_type ? ` · ${acct.account_type.replace("_", " ")}` : ""}</span>
+                      <span class="account-sub">···{#if editingAccountNumberId === acct.id}<input
+                            class="number-input"
+                            type="text"
+                            maxlength="4"
+                            bind:value={editingNumber}
+                            onblur={() => commitEditNumber(acct)}
+                            onkeydown={(e) => { if (e.key === "Enter") commitEditNumber(acct); if (e.key === "Escape") editingAccountNumberId = null; }}
+                            use:focusOnMount
+                          />{:else}<button class="number-display" onclick={() => startEditNumber(acct)} title="Click to edit account number">{acct.account_number_last4}</button>{/if}{acct.account_type ? ` · ${acct.account_type.replace("_", " ")}` : ""}</span>
                     </div>
 
                     <!-- Balance -->
@@ -952,9 +1028,33 @@
                         <span class="balance-value">—</span>
                       {/if}
                     </div>
+
+                    <!-- Merge -->
+                    <button class="merge-btn" onclick={() => startMerge(acct)} title="Merge into another account">Merge</button>
                   </li>
                 {/each}
               </ul>
+
+              {#if mergeSourceId !== null}
+                {@const mergeSource = accounts.find(a => a.id === mergeSourceId)}
+                <div class="merge-dialog">
+                  <h3 class="merge-title">Merge account</h3>
+                  <p class="merge-desc">Move all statements from <strong>{mergeSource?.display_name ?? mergeSource?.institution} ···{mergeSource?.account_number_last4}</strong> into:</p>
+                  <select class="merge-select" bind:value={mergeTargetId}>
+                    <option value="">Select target account…</option>
+                    {#each accounts.filter(a => a.id !== mergeSourceId) as a (a.id)}
+                      <option value={String(a.id)}>{a.display_name ?? a.institution} ···{a.account_number_last4}</option>
+                    {/each}
+                  </select>
+                  {#if mergeError}
+                    <p class="merge-error">{mergeError}</p>
+                  {/if}
+                  <div class="merge-actions">
+                    <button class="btn-secondary" onclick={cancelMerge}>Cancel</button>
+                    <button class="btn-danger" onclick={confirmMerge} disabled={!mergeTargetId}>Merge &amp; delete source</button>
+                  </div>
+                </div>
+              {/if}
             {/if}
           </section>
         {:else if activeView === "transactions"}
@@ -1082,10 +1182,11 @@
                           >
                             <option value="debit">debit</option>
                             <option value="credit">credit</option>
-                            <option value="transfer">transfer</option>
+                            <option value="debit-xfer">debit ↔</option>
+                            <option value="credit-xfer">credit ↔</option>
                           </select>
-                          <span class:tx-debit={editKind === "debit"} class:tx-credit={editKind === "credit"}>
-                            {editKind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                          <span class:tx-debit={editKind.startsWith("debit")} class:tx-credit={editKind.startsWith("credit")}>
+                            {editKind.startsWith("debit") ? "−" : "+"}{fmt(tx.amount)}
                           </span>
                         </td>
                       </tr>
@@ -1096,7 +1197,7 @@
                         <td class="tx-cat">{tx.category}</td>
                         <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
                         <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
-                          {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                          {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}{#if tx.is_transfer}<span class="tx-transfer-badge">↔</span>{/if}
                         </td>
                       </tr>
                     {/if}
@@ -1816,6 +1917,141 @@
     .balance-period { color: #777; }
   }
 
+  .number-display {
+    all: unset;
+    cursor: pointer;
+    border-bottom: 1px dashed transparent;
+    transition: border-color 0.15s;
+  }
+
+  .number-display:hover {
+    border-bottom-color: #aaa;
+  }
+
+  .number-input {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 0.75rem;
+    border: none;
+    border-bottom: 1px solid #396cd8;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    width: 3.5ch;
+  }
+
+  .merge-btn {
+    all: unset;
+    font-size: 0.72rem;
+    color: #888;
+    cursor: pointer;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    flex-shrink: 0;
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  .merge-btn:hover {
+    color: #c0392b;
+    border-color: #c0392b;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .merge-btn { border-color: #444; }
+    .merge-btn:hover { color: #e74c3c; border-color: #e74c3c; }
+  }
+
+  .merge-dialog {
+    margin-top: 1.5rem;
+    padding: 1.25rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 560px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .merge-dialog { background: #1a202c; border-color: #2d3748; }
+  }
+
+  .merge-title {
+    margin: 0;
+    font-size: 0.95rem;
+    font-weight: 700;
+  }
+
+  .merge-desc {
+    margin: 0;
+    font-size: 0.85rem;
+    color: #555;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .merge-desc { color: #aaa; }
+  }
+
+  .merge-select {
+    font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #d0d7de;
+    border-radius: 4px;
+    background: #fff;
+    color: inherit;
+    width: 100%;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .merge-select { background: #2d3748; border-color: #4a5568; }
+  }
+
+  .merge-error {
+    margin: 0;
+    font-size: 0.82rem;
+    color: #c0392b;
+  }
+
+  .merge-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+  }
+
+  .btn-secondary {
+    all: unset;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.35rem 0.85rem;
+    border: 1px solid #d0d7de;
+    border-radius: 5px;
+    transition: background 0.15s;
+  }
+
+  .btn-secondary:hover { background: #f0f0f0; }
+
+  @media (prefers-color-scheme: dark) {
+    .btn-secondary { border-color: #4a5568; }
+    .btn-secondary:hover { background: #2d3748; }
+  }
+
+  .btn-danger {
+    all: unset;
+    cursor: pointer;
+    font-size: 0.82rem;
+    padding: 0.35rem 0.85rem;
+    border-radius: 5px;
+    background: #c0392b;
+    color: #fff;
+    transition: background 0.15s;
+  }
+
+  .btn-danger:hover { background: #a93226; }
+  .btn-danger:disabled { opacity: 0.45; cursor: default; }
+
   /* ── Sections ── */
 
   .recent-section {
@@ -2240,6 +2476,13 @@
       border-color: #3a6aaa;
       color: #f6f6f6;
     }
+  }
+
+  .tx-transfer-badge {
+    margin-left: 0.25rem;
+    font-size: 0.72rem;
+    color: #888;
+    vertical-align: middle;
   }
 
   .tx-empty {
