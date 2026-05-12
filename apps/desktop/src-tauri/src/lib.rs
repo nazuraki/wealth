@@ -3,6 +3,7 @@ mod chart;
 mod dashboard;
 mod importer;
 mod settings;
+mod spending;
 mod transactions;
 
 use std::path::PathBuf;
@@ -62,6 +63,7 @@ pub fn run() {
             transactions::get_transactions,
             transactions::update_transaction,
             transactions::get_categories,
+            spending::get_spending_by_category,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
