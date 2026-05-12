@@ -4,6 +4,7 @@ pub const MIGRATION_003: &str = include_str!("../migrations/003_normalize_period
 pub const MIGRATION_004: &str = include_str!("../migrations/004_dedupe_accounts.sql");
 pub const MIGRATION_005: &str = include_str!("../migrations/005_account_display.sql");
 pub const MIGRATION_006: &str = include_str!("../migrations/006_transfer_type.sql");
+pub const MIGRATION_007: &str = include_str!("../migrations/007_is_transfer.sql");
 
 /// Apply all migrations in order. Idempotent: safe to call on every connection open.
 pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -26,8 +27,22 @@ pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
             Err(e) => return Err(e),
         }
     }
-    // Migration 006 rebuilds transactions to allow type = 'transfer'. The rebuild is idempotent:
-    // data is copied into transactions_v2 before the old table is dropped, so re-running is safe.
-    conn.execute_batch(MIGRATION_006)?;
+    // Check once whether migration 007 has been applied (is_transfer column present).
+    // This guards both 006 and 007: running 006 after 007 corrupts the schema because
+    // transactions now has 8 columns but transactions_v2 only expects 7.
+    let migration_007_applied: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM pragma_table_info('transactions') WHERE name = 'is_transfer'",
+        [],
+        |r| r.get(0),
+    )?;
+    if !migration_007_applied {
+        conn.execute_batch(MIGRATION_006)?;
+    }
+    // Drop orphaned intermediate tables left by any partial migration run.
+    conn.execute_batch("DROP TABLE IF EXISTS transactions_v2; DROP TABLE IF EXISTS transactions_v3;")?;
+    // Migration 007: replace type='transfer' with is_transfer flag.
+    if !migration_007_applied {
+        conn.execute_batch(MIGRATION_007)?;
+    }
     Ok(())
 }

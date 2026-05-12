@@ -34,6 +34,12 @@ pub fn run() {
             sql: db::MIGRATION_005,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 7,
+            description: "is_transfer flag replaces transfer type",
+            sql: db::MIGRATION_007,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -50,6 +56,7 @@ pub fn run() {
             chart::get_chart_data,
             accounts::get_accounts,
             accounts::update_account,
+            accounts::merge_accounts,
             settings::get_settings,
             settings::save_settings,
             transactions::get_transactions,
