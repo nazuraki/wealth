@@ -316,18 +316,20 @@
     if (direction === "append") offset = txOffset + txLoadedRows.length;
     else if (direction === "prepend") offset = Math.max(0, txOffset - TX_PAGE_SIZE);
 
+    const filters = {
+      account_id: txFilterAccount ? Number(txFilterAccount) : null,
+      date_from: txFilterDateFrom || null,
+      date_to: txFilterDateTo || null,
+      category: txFilterCategory || null,
+      kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
+      offset,
+      limit: TX_PAGE_SIZE,
+    };
+    console.log("[tx] loadTxPage", direction, "myId:", myId, "filters:", JSON.stringify(filters));
+
     try {
-      const page = await invoke<TransactionPage>("get_transactions", {
-        filters: {
-          account_id: txFilterAccount ? Number(txFilterAccount) : null,
-          date_from: txFilterDateFrom || null,
-          date_to: txFilterDateTo || null,
-          category: txFilterCategory || null,
-          kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
-          offset,
-          limit: TX_PAGE_SIZE,
-        },
-      });
+      const page = await invoke<TransactionPage>("get_transactions", { filters });
+      console.log("[tx] response myId:", myId, "txRequestId:", txRequestId, "total:", page.total, "rows:", page.rows.length);
       if (myId !== txRequestId) return;
 
       txTotal = page.total;
