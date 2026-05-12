@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, types::ToSql};
+use rusqlite::{Connection, params, types::ToSql};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{AppHandle, State};
@@ -145,6 +145,67 @@ pub async fn get_transactions(
 ) -> Result<TransactionPage, String> {
     let path = db.0.clone();
     tauri::async_runtime::spawn_blocking(move || do_get_transactions(&path, filters))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+fn do_update_transaction(db_path: &Path, id: i64, description: String, category: String, kind: String) -> Result<()> {
+    if !matches!(kind.as_str(), "debit" | "credit" | "transfer") {
+        anyhow::bail!("invalid transaction type: {kind}");
+    }
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
+    db::run_migrations(&conn)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    conn.execute(
+        "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+        params![description, category, kind, id],
+    )?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_transaction(
+    _app: AppHandle,
+    db: State<'_, crate::DbPath>,
+    id: i64,
+    description: String,
+    category: String,
+    kind: String,
+) -> Result<(), String> {
+    let path = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || do_update_transaction(&path, id, description, category, kind))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+fn do_get_categories(db_path: &Path) -> Result<Vec<String>> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = Connection::open(db_path)?;
+    db::run_migrations(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT category FROM transactions WHERE category != '' ORDER BY category COLLATE NOCASE",
+    )?;
+    let cats: Vec<String> = stmt
+        .query_map([], |r| r.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(cats)
+}
+
+#[tauri::command]
+pub async fn get_categories(
+    _app: AppHandle,
+    db: State<'_, crate::DbPath>,
+) -> Result<Vec<String>, String> {
+    let path = db.0.clone();
+    tauri::async_runtime::spawn_blocking(move || do_get_categories(&path))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
@@ -365,5 +426,93 @@ mod tests {
         let page = query_transaction_page(&conn, &filters).unwrap();
         assert_eq!(page.total, 0);
         assert!(page.rows.is_empty());
+    }
+
+    fn query_tx(conn: &Connection, id: i64) -> (String, String, String) {
+        conn.query_row(
+            "SELECT description, category, type FROM transactions WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap()
+    }
+
+    fn query_categories(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT category FROM transactions WHERE category != '' ORDER BY category COLLATE NOCASE")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    #[test]
+    fn update_transaction_persists_description_and_category() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
+
+        conn.execute(
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+            params!["Espresso", "Dining", "debit", tx_id],
+        )
+        .unwrap();
+
+        let (desc, cat, kind) = query_tx(&conn, tx_id);
+        assert_eq!(desc, "Espresso");
+        assert_eq!(cat, "Dining");
+        assert_eq!(kind, "debit");
+    }
+
+    #[test]
+    fn update_transaction_can_change_kind_to_transfer() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Wire", "Transfer", 500.0, "debit");
+
+        conn.execute(
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+            params!["Wire", "Transfer", "transfer", tx_id],
+        )
+        .unwrap();
+
+        let (_, _, kind) = query_tx(&conn, tx_id);
+        assert_eq!(kind, "transfer");
+    }
+
+    #[test]
+    fn update_transaction_nonexistent_id_is_no_op() {
+        let conn = open_test_db();
+        let affected = conn
+            .execute(
+                "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+                params!["X", "Y", "debit", 9999i64],
+            )
+            .unwrap();
+        assert_eq!(affected, 0);
+    }
+
+    #[test]
+    fn get_categories_returns_distinct_sorted() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
+        seed_tx(&conn, stmt, "2025-01-11", "Salary", "Income", 3000.0, "credit");
+        seed_tx(&conn, stmt, "2025-01-12", "Burger", "food", 12.0, "debit"); // duplicate category different case
+
+        let cats = query_categories(&conn);
+        // COLLATE NOCASE deduplication: "Food" and "food" are considered equal by ORDER BY,
+        // but DISTINCT still returns both since SQLite DISTINCT is case-sensitive.
+        // The test just verifies they are returned in case-insensitive order.
+        assert!(cats.contains(&"Food".to_string()) || cats.contains(&"food".to_string()));
+        assert!(cats.contains(&"Income".to_string()));
+        // "Food"/"food" should come before "Income" in case-insensitive order
+        let food_pos = cats.iter().position(|c| c.eq_ignore_ascii_case("food")).unwrap();
+        let income_pos = cats.iter().position(|c| c == "Income").unwrap();
+        assert!(food_pos < income_pos);
     }
 }

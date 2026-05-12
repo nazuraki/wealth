@@ -53,6 +53,8 @@ pub fn run() {
             settings::get_settings,
             settings::save_settings,
             transactions::get_transactions,
+            transactions::update_transaction,
+            transactions::get_categories,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

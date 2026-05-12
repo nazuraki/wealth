@@ -157,6 +157,12 @@
   let txLoading = $state(false);
   let txRequestId = 0;
 
+  let editingTxId = $state<number | null>(null);
+  let editDesc = $state("");
+  let editCat = $state("");
+  let editKind = $state("");
+  let txCategories = $state<string[]>([]);
+
   let contentEl = $state<HTMLElement | null>(null);
 
   function focusOnMount(node: HTMLElement) {
@@ -363,6 +369,57 @@
     txLoadedRows = [];
     txTotal = 0;
     loadTxPage("reset");
+  }
+
+  async function loadCategories() {
+    try {
+      txCategories = await invoke<string[]>("get_categories");
+    } catch {
+      // non-fatal — datalist just stays empty
+    }
+  }
+
+  function startEditTx(tx: Transaction) {
+    editingTxId = tx.id;
+    editDesc = tx.description;
+    editCat = tx.category;
+    editKind = tx.kind;
+  }
+
+  async function commitEditTx(tx: Transaction) {
+    if (editingTxId !== tx.id) return;
+    editingTxId = null;
+    const newDesc = editDesc.trim() || tx.description;
+    const newCat = editCat.trim() || tx.category;
+    const newKind = editKind || tx.kind;
+    if (newDesc === tx.description && newCat === tx.category && newKind === tx.kind) return;
+    const prevDesc = tx.description;
+    const prevCat = tx.category;
+    const prevKind = tx.kind;
+    tx.description = newDesc;
+    tx.category = newCat;
+    tx.kind = newKind;
+    txLoadedRows = [...txLoadedRows];
+    try {
+      await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category, kind: tx.kind });
+      loadCategories();
+    } catch {
+      tx.description = prevDesc;
+      tx.category = prevCat;
+      tx.kind = prevKind;
+      txLoadedRows = [...txLoadedRows];
+    }
+  }
+
+  function cancelEditTx() {
+    editingTxId = null;
+  }
+
+  function onEditRowFocusOut(tx: Transaction, e: FocusEvent) {
+    const related = e.relatedTarget as Node | null;
+    const row = e.currentTarget as HTMLElement;
+    if (related && row.contains(related)) return; // focus stayed within row
+    commitEditTx(tx);
   }
 
   // Scroll-based pagination: append when near bottom, prepend when near top
@@ -622,6 +679,7 @@
     if (id === "transactions") {
       if (accounts.length === 0) loadAccounts();
       resetAndLoadTransactions();
+      loadCategories();
     }
   }
 </script>
@@ -928,6 +986,11 @@
                 <p class="hint">No transactions match the current filters.</p>
               </div>
             {:else}
+              <datalist id="tx-categories-list">
+                {#each txCategories as cat}
+                  <option value={cat}></option>
+                {/each}
+              </datalist>
               <table class="tx-table">
                 <thead>
                   <tr>
@@ -940,15 +1003,54 @@
                 </thead>
                 <tbody>
                   {#each txLoadedRows as tx (tx.id)}
-                    <tr>
-                      <td class="tx-date">{tx.date}</td>
-                      <td class="tx-desc">{tx.description}</td>
-                      <td class="tx-cat">{tx.category}</td>
-                      <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
-                      <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
-                        {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
-                      </td>
-                    </tr>
+                    {#if editingTxId === tx.id}
+                      <tr class="tx-editing" onfocusout={(e) => onEditRowFocusOut(tx, e)}>
+                        <td class="tx-date">{tx.date}</td>
+                        <td class="tx-desc">
+                          <input
+                            class="tx-edit-input"
+                            type="text"
+                            bind:value={editDesc}
+                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                            use:focusOnMount
+                          />
+                        </td>
+                        <td class="tx-cat">
+                          <input
+                            class="tx-edit-input tx-edit-cat"
+                            type="text"
+                            list="tx-categories-list"
+                            bind:value={editCat}
+                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                          />
+                        </td>
+                        <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
+                        <td class="num-col tx-kind-amt">
+                          <select
+                            class="tx-kind-select"
+                            bind:value={editKind}
+                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                          >
+                            <option value="debit">debit</option>
+                            <option value="credit">credit</option>
+                            <option value="transfer">transfer</option>
+                          </select>
+                          <span class:tx-debit={editKind === "debit"} class:tx-credit={editKind === "credit"}>
+                            {editKind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                          </span>
+                        </td>
+                      </tr>
+                    {:else}
+                      <tr class="tx-row" onclick={() => startEditTx(tx)} title="Click to edit">
+                        <td class="tx-date">{tx.date}</td>
+                        <td class="tx-desc">{tx.description}</td>
+                        <td class="tx-cat">{tx.category}</td>
+                        <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
+                        <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
+                          {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                        </td>
+                      </tr>
+                    {/if}
                   {/each}
                 </tbody>
               </table>
@@ -1890,6 +1992,81 @@
 
   .tx-credit {
     color: #38a169;
+  }
+
+  .tx-row {
+    cursor: pointer;
+  }
+
+  .tx-row:hover td {
+    background: #f8f8f8;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-row:hover td {
+      background: #2a2a2a;
+    }
+  }
+
+  .tx-editing td {
+    background: #f0f6ff;
+    padding-top: 0.25rem;
+    padding-bottom: 0.25rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-editing td {
+      background: #1a2a3a;
+    }
+  }
+
+  .tx-edit-input {
+    font-size: 0.88rem;
+    font-family: inherit;
+    padding: 0.2em 0.4em;
+    border: 1px solid #99c0ff;
+    border-radius: 4px;
+    background: #fff;
+    color: inherit;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .tx-edit-cat {
+    min-width: 120px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-edit-input {
+      background: #1e1e1e;
+      border-color: #3a6aaa;
+      color: #f6f6f6;
+    }
+  }
+
+  .tx-kind-amt {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
+
+  .tx-kind-select {
+    font-size: 0.78rem;
+    font-family: inherit;
+    padding: 0.2em 0.3em;
+    border: 1px solid #99c0ff;
+    border-radius: 4px;
+    background: #fff;
+    color: inherit;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-kind-select {
+      background: #1e1e1e;
+      border-color: #3a6aaa;
+      color: #f6f6f6;
+    }
   }
 
   .tx-empty {
