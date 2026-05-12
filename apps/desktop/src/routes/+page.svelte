@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import {
     Chart,
     LineController,
@@ -106,6 +106,23 @@
     endpoint_url: string | null;
   }
 
+  interface Transaction {
+    id: number;
+    date: string;
+    description: string;
+    category: string;
+    amount: number;
+    kind: string;
+    account_id: number;
+    institution: string;
+    account_number_last4: string;
+  }
+
+  interface TransactionPage {
+    rows: Transaction[];
+    total: number;
+  }
+
   // ── State ─────────────────────────────────────────────────────────────────────
 
   let pageState = $state<PageState>("initializing");
@@ -124,6 +141,23 @@
   let accounts = $state<Account[]>([]);
   let editingAccountId = $state<number | null>(null);
   let editingName = $state("");
+
+  const TX_PAGE_SIZE = 100;
+  const TX_MAX_LOADED = 1000;
+
+  let txFilterAccount = $state("");
+  let txFilterDateFrom = $state("");
+  let txFilterDateTo = $state("");
+  let txFilterCategory = $state("");
+  let txFilterKinds = $state<string[]>(["debit", "credit"]);
+
+  let txOffset = $state(0);
+  let txTotal = $state(0);
+  let txLoadedRows = $state<Transaction[]>([]);
+  let txLoading = $state(false);
+  let txRequestId = 0;
+
+  let contentEl = $state<HTMLElement | null>(null);
 
   function focusOnMount(node: HTMLElement) {
     node.focus();
@@ -267,6 +301,87 @@
       // non-fatal
     }
   }
+
+  async function loadTxPage(direction: "reset" | "append" | "prepend") {
+    if (txLoading && direction !== "reset") return;
+    txLoading = true;
+    const myId = ++txRequestId;
+
+    let offset = 0;
+    if (direction === "append") offset = txOffset + txLoadedRows.length;
+    else if (direction === "prepend") offset = Math.max(0, txOffset - TX_PAGE_SIZE);
+
+    try {
+      const page = await invoke<TransactionPage>("get_transactions", {
+        filters: {
+          account_id: txFilterAccount ? Number(txFilterAccount) : null,
+          date_from: txFilterDateFrom || null,
+          date_to: txFilterDateTo || null,
+          category: txFilterCategory || null,
+          kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
+          offset,
+          limit: TX_PAGE_SIZE,
+        },
+      });
+      if (myId !== txRequestId) return;
+
+      txTotal = page.total;
+
+      if (direction === "reset") {
+        txOffset = 0;
+        txLoadedRows = page.rows;
+      } else if (direction === "append") {
+        const combined = [...txLoadedRows, ...page.rows];
+        if (combined.length > TX_MAX_LOADED) {
+          const drop = combined.length - TX_MAX_LOADED;
+          txOffset += drop;
+          txLoadedRows = combined.slice(drop);
+        } else {
+          txLoadedRows = combined;
+        }
+      } else {
+        const prevScrollHeight = contentEl?.scrollHeight ?? 0;
+        const prevScrollTop = contentEl?.scrollTop ?? 0;
+        const combined = [...page.rows, ...txLoadedRows];
+        txOffset = offset;
+        txLoadedRows = combined.length > TX_MAX_LOADED ? combined.slice(0, TX_MAX_LOADED) : combined;
+        await tick();
+        if (contentEl && myId === txRequestId) {
+          contentEl.scrollTop = prevScrollTop + (contentEl.scrollHeight - prevScrollHeight);
+        }
+      }
+    } catch (err) {
+      console.error("get_transactions failed:", err);
+      if (myId === txRequestId && direction === "reset") txLoadedRows = [];
+    } finally {
+      if (myId === txRequestId) txLoading = false;
+    }
+  }
+
+  function resetAndLoadTransactions() {
+    txOffset = 0;
+    txLoadedRows = [];
+    txTotal = 0;
+    loadTxPage("reset");
+  }
+
+  // Scroll-based pagination: append when near bottom, prepend when near top
+  $effect(() => {
+    if (activeView !== "transactions" || !contentEl) return;
+    function onScroll() {
+      if (txLoading) return;
+      const el = contentEl!;
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 300;
+      const nearTop = el.scrollTop < 300 && txOffset > 0;
+      if (nearBottom) {
+        if (txOffset + txLoadedRows.length < txTotal) loadTxPage("append");
+      } else if (nearTop) {
+        loadTxPage("prepend");
+      }
+    }
+    contentEl.addEventListener("scroll", onScroll, { passive: true });
+    return () => contentEl!.removeEventListener("scroll", onScroll);
+  });
 
   async function loadSettings() {
     try {
@@ -504,6 +619,10 @@
   function handleNavClick(id: ActiveView) {
     activeView = id;
     if (id === "accounts") loadAccounts();
+    if (id === "transactions") {
+      if (accounts.length === 0) loadAccounts();
+      resetAndLoadTransactions();
+    }
   }
 </script>
 
@@ -569,7 +688,7 @@
     {/each}
   </nav>
 
-  <main class="content">
+  <main class="content" bind:this={contentEl}>
     {#if pageState === "initializing"}
       <div class="center-frame">
         <div class="spinner" aria-label="Loading…"></div>
@@ -732,20 +851,109 @@
             {/if}
           </section>
         {:else if activeView === "transactions"}
-          <div class="center-frame">
-            <div class="state-card">
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-                <line x1="8" y1="6" x2="21" y2="6" />
-                <line x1="8" y1="12" x2="21" y2="12" />
-                <line x1="8" y1="18" x2="21" y2="18" />
-                <circle cx="3" cy="6" r="1" fill="currentColor" stroke="none" />
-                <circle cx="3" cy="12" r="1" fill="currentColor" stroke="none" />
-                <circle cx="3" cy="18" r="1" fill="currentColor" stroke="none" />
-              </svg>
-              <p class="headline">Transaction History</p>
-              <p class="hint">Coming soon</p>
+          <section class="transactions-section" aria-label="Transactions">
+            <h2 class="section-title">Transactions</h2>
+            <div class="tx-filters" role="search" aria-label="Filter transactions">
+              <select
+                class="filter-select"
+                bind:value={txFilterAccount}
+                onchange={resetAndLoadTransactions}
+                aria-label="Filter by account"
+              >
+                <option value="">All accounts</option>
+                {#each accounts as acct (acct.id)}
+                  <option value={String(acct.id)}>
+                    {acct.display_name ?? acct.institution} ···{acct.account_number_last4}
+                  </option>
+                {/each}
+              </select>
+              <input
+                type="date"
+                class="filter-input"
+                value={txFilterDateFrom}
+                oninput={(e) => { txFilterDateFrom = (e.currentTarget as HTMLInputElement).value; resetAndLoadTransactions(); }}
+                aria-label="Date from"
+                title="From date"
+              />
+              <input
+                type="date"
+                class="filter-input"
+                value={txFilterDateTo}
+                oninput={(e) => { txFilterDateTo = (e.currentTarget as HTMLInputElement).value; resetAndLoadTransactions(); }}
+                aria-label="Date to"
+                title="To date"
+              />
+              <input
+                type="text"
+                class="filter-input filter-category"
+                placeholder="Category"
+                bind:value={txFilterCategory}
+                onchange={resetAndLoadTransactions}
+                aria-label="Filter by category"
+              />
+              <fieldset class="filter-kinds" aria-label="Transaction type">
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="debit" onchange={resetAndLoadTransactions} />
+                  Debit
+                </label>
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="credit" onchange={resetAndLoadTransactions} />
+                  Credit
+                </label>
+                <label class="kind-label">
+                  <input type="checkbox" bind:group={txFilterKinds} value="transfer" onchange={resetAndLoadTransactions} />
+                  Transfer
+                </label>
+              </fieldset>
             </div>
-          </div>
+            <div class="tx-count-row">
+              {#if txLoading && txLoadedRows.length === 0}
+                <span class="hint">Loading…</span>
+              {:else}
+                <span class="hint">
+                  Found {txTotal.toLocaleString()} transaction{txTotal === 1 ? "" : "s"}
+                  {#if txOffset > 0 || txOffset + txLoadedRows.length < txTotal}
+                    <span class="tx-window-hint">
+                      (showing {(txOffset + 1).toLocaleString()}–{(txOffset + txLoadedRows.length).toLocaleString()})
+                    </span>
+                  {/if}
+                </span>
+                {#if txLoading}
+                  <span class="tx-loading-inline">Loading…</span>
+                {/if}
+              {/if}
+            </div>
+            {#if txLoadedRows.length === 0 && !txLoading}
+              <div class="tx-empty">
+                <p class="hint">No transactions match the current filters.</p>
+              </div>
+            {:else}
+              <table class="tx-table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Description</th>
+                    <th>Category</th>
+                    <th>Account</th>
+                    <th class="num-col">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each txLoadedRows as tx (tx.id)}
+                    <tr>
+                      <td class="tx-date">{tx.date}</td>
+                      <td class="tx-desc">{tx.description}</td>
+                      <td class="tx-cat">{tx.category}</td>
+                      <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
+                      <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
+                        {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                      </td>
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            {/if}
+          </section>
         {:else if activeView === "imports"}
           <section class="recent-section" aria-label="Import log">
             <h2 class="section-title">Import Log</h2>
@@ -1534,5 +1742,169 @@
 
   button:not(.nav-btn):not(.name-display):hover {
     background-color: #2d5bc7;
+  }
+
+  /* ── Transactions ── */
+
+  .transactions-section {
+    width: 100%;
+    max-width: 960px;
+  }
+
+  .tx-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .filter-select,
+  .filter-input {
+    font-size: 0.85rem;
+    padding: 0.35em 0.6em;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    color: inherit;
+    min-width: 120px;
+  }
+
+  .filter-category {
+    min-width: 160px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .filter-select,
+    .filter-input {
+      background: #222;
+      border-color: #444;
+      color: #f6f6f6;
+    }
+  }
+
+  .filter-kinds {
+    all: unset;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    padding: 0.3em 0.7em;
+    font-size: 0.85rem;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .filter-kinds {
+      border-color: #444;
+    }
+  }
+
+  .kind-label {
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .tx-count-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.5rem;
+    min-height: 1.4rem;
+  }
+
+  .tx-window-hint {
+    color: #aaa;
+  }
+
+  .tx-loading-inline {
+    font-size: 0.8rem;
+    color: #888;
+  }
+
+  .tx-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+  }
+
+  .tx-table th {
+    text-align: left;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 2px solid #e0e0e0;
+    font-weight: 600;
+    color: #666;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  .tx-table td {
+    padding: 0.45rem 0.75rem;
+    border-bottom: 1px solid #f0f0f0;
+    vertical-align: middle;
+  }
+
+  .tx-table tr:last-child td {
+    border-bottom: none;
+  }
+
+  .tx-date {
+    white-space: nowrap;
+    color: #888;
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tx-desc {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tx-cat {
+    color: #888;
+    font-size: 0.83rem;
+  }
+
+  .tx-acct {
+    color: #888;
+    font-size: 0.83rem;
+    white-space: nowrap;
+  }
+
+  .num-col {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .tx-debit {
+    color: #e05252;
+  }
+
+  .tx-credit {
+    color: #38a169;
+  }
+
+  .tx-empty {
+    padding: 3rem 0;
+    text-align: center;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-table th {
+      border-bottom-color: #333;
+      color: #888;
+    }
+
+    .tx-table td {
+      border-bottom-color: #222;
+    }
   }
 </style>

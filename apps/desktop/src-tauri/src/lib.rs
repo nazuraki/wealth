@@ -3,6 +3,7 @@ mod chart;
 mod dashboard;
 mod importer;
 mod settings;
+mod transactions;
 
 use std::path::PathBuf;
 use tauri::Manager;
@@ -51,6 +52,7 @@ pub fn run() {
             accounts::update_account,
             settings::get_settings,
             settings::save_settings,
+            transactions::get_transactions,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
@@ -72,6 +74,9 @@ pub fn run() {
                 if let (Some(w), Some(h)) = (s.window_width, s.window_height) {
                     let _ = win.set_size(tauri::PhysicalSize::new(w, h));
                 }
+                // Show after applying saved geometry so macOS doesn't override
+                // the position before the native frame has settled.
+                let _ = win.show();
 
                 let win2 = win.clone();
                 win.on_window_event(move |event| {
