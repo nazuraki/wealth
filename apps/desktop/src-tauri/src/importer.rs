@@ -16,6 +16,19 @@ pub struct ImportSummary {
     pub transaction_count: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DuplicateConflict {
+    pub institution: String,
+    pub account_number_last4: String,
+    pub statement_period: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportResponse {
+    pub summaries: Vec<ImportSummary>,
+    pub conflicts: Vec<DuplicateConflict>,
+}
+
 // ── Transfer detection ────────────────────────────────────────────────────────
 
 const TRANSFER_PATTERNS: &[&str] = &[
@@ -34,13 +47,8 @@ fn is_transfer(description: &str) -> bool {
 
 // ── DB write (testable inner fn) ──────────────────────────────────────────────
 
-fn write_account_to_tx(
-    tx: &Transaction<'_>,
-    source_file: &str,
-    extraction: &AccountExtraction,
-) -> Result<ImportSummary> {
+fn upsert_account(tx: &Transaction<'_>, extraction: &AccountExtraction) -> Result<i64> {
     let acct = &extraction.account;
-
     // Accounts are keyed on last4 only — institution name variants of the same card map to one record.
     tx.execute(
         "INSERT INTO accounts (institution, account_number_last4, account_type) \
@@ -53,12 +61,58 @@ fn write_account_to_tx(
             params![acct.account_type, acct.account_number_last4],
         )?;
     }
-
-    let account_id: i64 = tx.query_row(
+    let id: i64 = tx.query_row(
         "SELECT id FROM accounts WHERE account_number_last4 = ?1",
         params![acct.account_number_last4],
         |row| row.get(0),
     )?;
+    Ok(id)
+}
+
+fn check_account_conflict(
+    tx: &Transaction<'_>,
+    extraction: &AccountExtraction,
+) -> Result<Option<DuplicateConflict>> {
+    let acct = &extraction.account;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM statements s
+            JOIN accounts a ON a.id = s.account_id
+            WHERE a.account_number_last4 = ?1 AND s.statement_period = ?2
+         )",
+        params![acct.account_number_last4, acct.statement_period],
+        |row| row.get(0),
+    )?;
+    if exists {
+        Ok(Some(DuplicateConflict {
+            institution: acct.institution.clone(),
+            account_number_last4: acct.account_number_last4.clone(),
+            statement_period: acct.statement_period.clone(),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn detect_conflicts(
+    tx: &Transaction<'_>,
+    result: &ExtractionResult,
+) -> Result<Vec<DuplicateConflict>> {
+    result
+        .accounts
+        .iter()
+        .filter_map(|a| check_account_conflict(tx, a).transpose())
+        .collect()
+}
+
+fn write_account_to_tx(
+    tx: &Transaction<'_>,
+    source_file: &str,
+    extraction: &AccountExtraction,
+    overwrite: bool,
+) -> Result<ImportSummary> {
+    let acct = &extraction.account;
+    let account_id = upsert_account(tx, extraction)?;
 
     tx.execute(
         "INSERT OR IGNORE INTO statements \
@@ -80,7 +134,30 @@ fn write_account_to_tx(
         |row| row.get(0),
     )?;
 
-    if statement_inserted {
+    let write_transactions = if statement_inserted {
+        true
+    } else if overwrite {
+        tx.execute(
+            "DELETE FROM transactions WHERE statement_id = ?1",
+            params![statement_id],
+        )?;
+        // Update statement metadata in case it changed.
+        tx.execute(
+            "UPDATE statements SET opening_balance = ?1, closing_balance = ?2, source_file = ?3 \
+             WHERE id = ?4",
+            params![
+                acct.opening_balance,
+                acct.closing_balance,
+                source_file,
+                statement_id
+            ],
+        )?;
+        true
+    } else {
+        false
+    };
+
+    if write_transactions {
         let mut stmt = tx.prepare(
             "INSERT INTO transactions (statement_id, date, description, category, amount, type) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -110,7 +187,7 @@ fn write_account_to_tx(
         institution: acct.institution.clone(),
         account_number_last4: acct.account_number_last4.clone(),
         statement_period: acct.statement_period.clone(),
-        transaction_count: if statement_inserted {
+        transaction_count: if write_transactions {
             extraction.transactions.len()
         } else {
             0
@@ -122,11 +199,12 @@ fn write_to_tx(
     tx: &Transaction<'_>,
     source_file: &str,
     result: &ExtractionResult,
+    overwrite: bool,
 ) -> Result<Vec<ImportSummary>> {
     result
         .accounts
         .iter()
-        .map(|a| write_account_to_tx(tx, source_file, a))
+        .map(|a| write_account_to_tx(tx, source_file, a, overwrite))
         .collect()
 }
 
@@ -134,19 +212,33 @@ pub(crate) fn write_to_db(
     db_path: &Path,
     source_file: &str,
     result: &ExtractionResult,
+    overwrite: bool,
 ) -> Result<Vec<ImportSummary>> {
     let mut conn = Connection::open(db_path)?;
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     let tx = conn.transaction()?;
-    let summaries = write_to_tx(&tx, source_file, result)?;
+    let summaries = write_to_tx(&tx, source_file, result, overwrite)?;
     tx.commit()?;
     Ok(summaries)
 }
 
+pub(crate) fn check_conflicts_in_db(
+    db_path: &Path,
+    result: &ExtractionResult,
+) -> Result<Vec<DuplicateConflict>> {
+    let mut conn = Connection::open(db_path)?;
+    db::run_migrations(&conn)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let tx = conn.transaction()?;
+    let conflicts = detect_conflicts(&tx, result)?;
+    // No commit needed — read-only.
+    Ok(conflicts)
+}
+
 // ── Tauri command ─────────────────────────────────────────────────────────────
 
-fn do_import(app: &AppHandle, db_path: PathBuf, path: &str) -> Result<Vec<ImportSummary>> {
+fn do_import(app: &AppHandle, db_path: PathBuf, path: &str, overwrite: bool) -> Result<ImportResponse> {
     let pdf_path = PathBuf::from(path);
     let data_dir = app.path().app_data_dir()?;
 
@@ -168,13 +260,27 @@ fn do_import(app: &AppHandle, db_path: PathBuf, path: &str) -> Result<Vec<Import
         .and_then(|n| n.to_str())
         .unwrap_or(path);
     let result = parse_line_items(&text, label, &client)?;
-    write_to_db(&db_path, path, &result)
+
+    if !overwrite {
+        let conflicts = check_conflicts_in_db(&db_path, &result)?;
+        if !conflicts.is_empty() {
+            return Ok(ImportResponse { summaries: vec![], conflicts });
+        }
+    }
+
+    let summaries = write_to_db(&db_path, path, &result, overwrite)?;
+    Ok(ImportResponse { summaries, conflicts: vec![] })
 }
 
 #[tauri::command]
-pub async fn import_statement(app: AppHandle, db: State<'_, crate::DbPath>, path: String) -> Result<Vec<ImportSummary>, String> {
+pub async fn import_statement(
+    app: AppHandle,
+    db: State<'_, crate::DbPath>,
+    path: String,
+    overwrite: bool,
+) -> Result<ImportResponse, String> {
     let db_path = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || do_import(&app, db_path, &path))
+    tauri::async_runtime::spawn_blocking(move || do_import(&app, db_path, &path, overwrite))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
@@ -258,7 +364,7 @@ mod tests {
     fn write_inserts_account_statement_transactions() {
         let mut conn = open_test_db();
         let tx = conn.transaction().unwrap();
-        let summaries = write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
+        let summaries = write_to_tx(&tx, "test.pdf", &fixture(), false).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(summaries.len(), 1);
@@ -282,7 +388,7 @@ mod tests {
 
         let mut conn = open_test_db();
         let tx = conn.transaction().unwrap();
-        let summaries = write_to_tx(&tx, "combined.pdf", &result).unwrap();
+        let summaries = write_to_tx(&tx, "combined.pdf", &result, false).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(summaries.len(), 2);
@@ -303,7 +409,7 @@ mod tests {
         let mut conn = open_test_db();
 
         let tx = conn.transaction().unwrap();
-        write_to_tx(&tx, "dec.pdf", &fixture()).unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
         tx.commit().unwrap();
 
         let mut variant = fixture();
@@ -311,7 +417,7 @@ mod tests {
         variant.accounts[0].account.statement_period = "2025-01".into();
 
         let tx = conn.transaction().unwrap();
-        write_to_tx(&tx, "jan.pdf", &variant).unwrap();
+        write_to_tx(&tx, "jan.pdf", &variant, false).unwrap();
         tx.commit().unwrap();
 
         let count: i64 = conn
@@ -330,7 +436,7 @@ mod tests {
         let mut conn = open_test_db();
         for _ in 0..2 {
             let tx = conn.transaction().unwrap();
-            write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
+            write_to_tx(&tx, "test.pdf", &fixture(), false).unwrap();
             tx.commit().unwrap();
         }
         let count: i64 = conn
@@ -344,7 +450,7 @@ mod tests {
         let mut conn = open_test_db();
         for _ in 0..2 {
             let tx = conn.transaction().unwrap();
-            write_to_tx(&tx, "test.pdf", &fixture()).unwrap();
+            write_to_tx(&tx, "test.pdf", &fixture(), false).unwrap();
             tx.commit().unwrap();
         }
         let tx_count: i64 = conn
@@ -362,12 +468,12 @@ mod tests {
         let mut conn = open_test_db();
 
         let tx = conn.transaction().unwrap();
-        write_to_tx(&tx, "dec.pdf", &fixture()).unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
         tx.commit().unwrap();
 
         let jan = make_extraction("4242", "2025-01", "checking");
         let tx = conn.transaction().unwrap();
-        let summaries = write_to_tx(&tx, "jan.pdf", &jan).unwrap();
+        let summaries = write_to_tx(&tx, "jan.pdf", &jan, false).unwrap();
         tx.commit().unwrap();
 
         assert_eq!(summaries[0].transaction_count, 2);
@@ -417,7 +523,7 @@ mod tests {
 
         let mut conn = open_test_db();
         let tx = conn.transaction().unwrap();
-        write_to_tx(&tx, "test.pdf", &result).unwrap();
+        write_to_tx(&tx, "test.pdf", &result, false).unwrap();
         tx.commit().unwrap();
 
         let types: Vec<String> = conn
@@ -428,5 +534,132 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(types, vec!["transfer", "debit"]);
+    }
+
+    // ── Conflict detection tests ──────────────────────────────────────────────
+
+    #[test]
+    fn detect_conflicts_returns_duplicate() {
+        let mut conn = open_test_db();
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
+        tx.commit().unwrap();
+
+        let tx = conn.transaction().unwrap();
+        let conflicts = detect_conflicts(&tx, &fixture()).unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].account_number_last4, "4242");
+        assert_eq!(conflicts[0].statement_period, "2024-12");
+    }
+
+    #[test]
+    fn detect_conflicts_returns_empty_for_new_statement() {
+        let mut conn = open_test_db();
+        let tx = conn.transaction().unwrap();
+        let conflicts = detect_conflicts(&tx, &fixture()).unwrap();
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn skip_makes_no_db_changes() {
+        let mut conn = open_test_db();
+
+        // First import.
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
+        tx.commit().unwrap();
+
+        // Second import with overwrite=false should skip (0 transactions written).
+        let tx = conn.transaction().unwrap();
+        let summaries = write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(summaries[0].transaction_count, 0);
+        let tx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tx_count, 2);
+    }
+
+    #[test]
+    fn overwrite_replaces_transactions() {
+        let mut conn = open_test_db();
+
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
+        tx.commit().unwrap();
+
+        // Build a replacement with a different transaction.
+        let mut replacement = fixture();
+        replacement.accounts[0].transactions = vec![extractor::Transaction {
+            date: "2024-12-15".into(),
+            description: "NEW TRANSACTION".into(),
+            category: "Other".into(),
+            amount: 42.0,
+            transaction_type: TransactionType::Debit,
+        }];
+
+        let tx = conn.transaction().unwrap();
+        let summaries = write_to_tx(&tx, "dec.pdf", &replacement, true).unwrap();
+        tx.commit().unwrap();
+
+        assert_eq!(summaries[0].transaction_count, 1);
+
+        let tx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tx_count, 1);
+
+        let desc: String = conn
+            .query_row("SELECT description FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(desc, "NEW TRANSACTION");
+    }
+
+    #[test]
+    fn overwrite_only_affects_conflicting_statement() {
+        let mut conn = open_test_db();
+
+        // Import two statements for the same account.
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &fixture(), false).unwrap();
+        tx.commit().unwrap();
+
+        let jan = make_extraction("4242", "2025-01", "checking");
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "jan.pdf", &jan, false).unwrap();
+        tx.commit().unwrap();
+
+        // Overwrite only the December statement.
+        let mut replacement = fixture();
+        replacement.accounts[0].transactions = vec![extractor::Transaction {
+            date: "2024-12-20".into(),
+            description: "ONLY NEW".into(),
+            category: "Other".into(),
+            amount: 10.0,
+            transaction_type: TransactionType::Debit,
+        }];
+
+        let tx = conn.transaction().unwrap();
+        write_to_tx(&tx, "dec.pdf", &replacement, true).unwrap();
+        tx.commit().unwrap();
+
+        // Total: 1 (overwritten Dec) + 2 (untouched Jan) = 3.
+        let tx_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM transactions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tx_count, 3);
+
+        // The December statement has exactly the new transaction.
+        let dec_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transactions t \
+                 JOIN statements s ON s.id = t.statement_id \
+                 WHERE s.statement_period = '2024-12'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dec_count, 1);
     }
 }

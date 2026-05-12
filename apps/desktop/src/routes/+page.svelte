@@ -46,6 +46,17 @@
     transaction_count: number;
   }
 
+  interface DuplicateConflict {
+    institution: string;
+    account_number_last4: string;
+    statement_period: string;
+  }
+
+  interface ImportResponse {
+    summaries: ImportSummary[];
+    conflicts: DuplicateConflict[];
+  }
+
   function importBannerText(summaries: ImportSummary[]): string {
     const total = summaries.reduce((n, s) => n + s.transaction_count, 0);
     if (summaries.length === 1) {
@@ -133,6 +144,10 @@
   let importError = $state("");
   let dragging = $state(false);
   let importBanner = $state(false);
+
+  let conflictDialogOpen = $state(false);
+  let pendingImportPath = $state<string | null>(null);
+  let pendingConflicts = $state<DuplicateConflict[]>([]);
 
   let chartFrom = $state("");
   let chartTo = $state("");
@@ -558,7 +573,41 @@
     pageState = "importing";
     importError = "";
     try {
-      lastImport = await invoke<ImportSummary[]>("import_statement", { path });
+      const response = await invoke<ImportResponse>("import_statement", { path, overwrite: false });
+      if (response.conflicts.length > 0) {
+        pendingImportPath = path;
+        pendingConflicts = response.conflicts;
+        conflictDialogOpen = true;
+        pageState = dashboard ? "dashboard" : "empty";
+      } else {
+        lastImport = response.summaries;
+        await loadDashboard();
+        importBanner = true;
+        setTimeout(() => (importBanner = false), 4000);
+      }
+    } catch (e) {
+      importError = String(e);
+      pageState = "import-error";
+    }
+  }
+
+  function skipImport() {
+    conflictDialogOpen = false;
+    pendingImportPath = null;
+    pendingConflicts = [];
+  }
+
+  async function overwriteImport() {
+    if (!pendingImportPath) return;
+    const path = pendingImportPath;
+    conflictDialogOpen = false;
+    pendingImportPath = null;
+    pendingConflicts = [];
+    pageState = "importing";
+    importError = "";
+    try {
+      const response = await invoke<ImportResponse>("import_statement", { path, overwrite: true });
+      lastImport = response.summaries;
       await loadDashboard();
       importBanner = true;
       setTimeout(() => (importBanner = false), 4000);
@@ -1137,6 +1186,27 @@
       {importBannerText(lastImport)}
     </div>
   {/if}
+
+  {#if conflictDialogOpen}
+    <div class="dialog-backdrop" role="presentation" onclick={skipImport} onkeydown={(e) => e.key === "Escape" && skipImport()}>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="conflict-title" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+        <h2 id="conflict-title">Duplicate statement{pendingConflicts.length > 1 ? "s" : ""} detected</h2>
+        <p class="dialog-body">
+          The following statement{pendingConflicts.length > 1 ? "s" : ""} already exist in the database.
+          Choose <strong>Overwrite</strong> to replace the existing transactions, or <strong>Skip</strong> to cancel.
+        </p>
+        <ul class="conflict-list">
+          {#each pendingConflicts as c}
+            <li>{c.institution} ···{c.account_number_last4} &mdash; {c.statement_period}</li>
+          {/each}
+        </ul>
+        <div class="dialog-actions">
+          <button class="btn-secondary" onclick={skipImport}>Skip</button>
+          <button class="btn-danger" onclick={overwriteImport}>Overwrite</button>
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1378,6 +1448,109 @@
       background: rgba(56, 161, 105, 0.15);
       color: #68d391;
       box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+  }
+
+  /* ── Conflict dialog ── */
+
+  .dialog-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+  }
+
+  .dialog {
+    background: #fff;
+    border-radius: 10px;
+    padding: 1.5rem;
+    width: min(420px, 90vw);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  }
+
+  .dialog h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+
+  .dialog-body {
+    margin: 0 0 1rem;
+    font-size: 0.9rem;
+    color: #555;
+    line-height: 1.5;
+  }
+
+  .conflict-list {
+    margin: 0 0 1.25rem;
+    padding: 0 0 0 1.25rem;
+    font-size: 0.875rem;
+    color: #333;
+  }
+
+  .conflict-list li {
+    margin-bottom: 0.25rem;
+  }
+
+  .dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.6rem;
+  }
+
+  .btn-secondary {
+    padding: 0.45rem 1rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+
+  .btn-secondary:hover {
+    background: #f5f5f5;
+  }
+
+  .btn-danger {
+    padding: 0.45rem 1rem;
+    border: none;
+    border-radius: 6px;
+    background: #e53e3e;
+    color: #fff;
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .btn-danger:hover {
+    background: #c53030;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .dialog {
+      background: #1e1e1e;
+      color: #f0f0f0;
+    }
+
+    .dialog-body {
+      color: #aaa;
+    }
+
+    .conflict-list {
+      color: #ccc;
+    }
+
+    .btn-secondary {
+      background: #2a2a2a;
+      border-color: #444;
+      color: #f0f0f0;
+    }
+
+    .btn-secondary:hover {
+      background: #333;
     }
   }
 
