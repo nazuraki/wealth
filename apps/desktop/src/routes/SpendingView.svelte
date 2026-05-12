@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount, onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import {
     Chart,
     DoughnutController,
@@ -22,7 +22,7 @@
   type SortCol = "category" | "total" | "percentage";
   type SortDir = "asc" | "desc";
 
-  let { accounts }: { accounts: Account[] } = $props();
+  let { accounts, active = true }: { accounts: Account[]; active?: boolean } = $props();
 
   let period = $state<Period>("30d");
   let customFrom = $state("");
@@ -87,10 +87,21 @@
   }
 
   function updateChart() {
-    if (!canvasEl) return;
+    if (!canvasEl) {
+      chart?.destroy();
+      chart = null;
+      return;
+    }
     const labels = rows.map((r) => r.category || "(uncategorized)");
     const data = rows.map((r) => r.total);
     const colors = rows.map((_, i) => COLORS[i % COLORS.length]);
+
+    // Destroy and recreate if the canvas element changed (happens when the DOM
+    // remounts after a loading/empty state transition).
+    if (chart && chart.canvas !== canvasEl) {
+      chart.destroy();
+      chart = null;
+    }
 
     if (chart) {
       chart.data.labels = labels;
@@ -134,6 +145,14 @@
   $effect(() => {
     // Update chart whenever rows change (after load)
     updateChart();
+  });
+
+  $effect(() => {
+    // When the view becomes visible again after being CSS-hidden, Chart.js needs
+    // to recalculate dimensions (it had zero size while display:none).
+    if (active) {
+      tick().then(() => chart?.resize());
+    }
   });
 
   onDestroy(() => {

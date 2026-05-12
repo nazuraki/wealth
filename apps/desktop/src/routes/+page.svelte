@@ -1204,8 +1204,6 @@
               </table>
             {/if}
           </section>
-        {:else if activeView === "spending"}
-          <SpendingView {accounts} />
         {:else if activeView === "imports"}
           <section class="recent-section" aria-label="Import log">
             <h2 class="section-title">Import Log</h2>
@@ -1236,6 +1234,11 @@
           </section>
         {/if}
       {/if}
+
+      <!-- SpendingView stays mounted to preserve filter state; CSS hides it when inactive -->
+      <div class="view-panel" class:view-hidden={activeView !== "spending"}>
+        <SpendingView {accounts} active={activeView === "spending"} />
+      </div>
     {/if}
 
     {#if activeView === "settings"}
@@ -1435,6 +1438,15 @@
     box-sizing: border-box;
     position: relative;
     overflow-y: auto;
+  }
+
+  .view-panel {
+    width: 100%;
+    max-width: 900px;
+  }
+
+  .view-hidden {
+    display: none;
   }
 
   .center-frame {
