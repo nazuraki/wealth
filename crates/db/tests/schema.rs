@@ -63,7 +63,13 @@ fn enforces_transaction_type_check() {
         "INSERT INTO transactions (statement_id, date, description, category, amount, type) VALUES (1, '2024-01-01', 'Test', 'Misc', 10.0, 'transfer')",
         [],
     );
-    assert!(transfer.is_ok(), "type = 'transfer' should be accepted");
+    assert!(transfer.is_err(), "type = 'transfer' should be rejected after migration 007");
+
+    let xfer_with_flag = conn.execute(
+        "INSERT INTO transactions (statement_id, date, description, category, amount, type, is_transfer) VALUES (1, '2024-01-01', 'Test', 'Misc', 10.0, 'debit', 1)",
+        [],
+    );
+    assert!(xfer_with_flag.is_ok(), "debit with is_transfer=1 should be accepted");
 
     let bad = conn.execute(
         "INSERT INTO transactions (statement_id, date, description, category, amount, type) VALUES (1, '2024-01-01', 'Test', 'Misc', 10.0, 'invalid')",
