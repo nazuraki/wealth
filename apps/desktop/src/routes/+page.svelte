@@ -160,6 +160,7 @@
   let editingTxId = $state<number | null>(null);
   let editDesc = $state("");
   let editCat = $state("");
+  let editKind = $state("");
   let txCategories = $state<string[]>([]);
 
   let contentEl = $state<HTMLElement | null>(null);
@@ -382,26 +383,30 @@
     editingTxId = tx.id;
     editDesc = tx.description;
     editCat = tx.category;
+    editKind = tx.kind;
   }
 
   async function commitEditTx(tx: Transaction) {
     if (editingTxId !== tx.id) return;
     editingTxId = null;
-    const newDesc = editDesc.trim();
-    const newCat = editCat.trim();
-    if (newDesc === tx.description && newCat === tx.category) return;
+    const newDesc = editDesc.trim() || tx.description;
+    const newCat = editCat.trim() || tx.category;
+    const newKind = editKind || tx.kind;
+    if (newDesc === tx.description && newCat === tx.category && newKind === tx.kind) return;
     const prevDesc = tx.description;
     const prevCat = tx.category;
-    tx.description = newDesc || prevDesc;
-    tx.category = newCat || prevCat;
+    const prevKind = tx.kind;
+    tx.description = newDesc;
+    tx.category = newCat;
+    tx.kind = newKind;
     txLoadedRows = [...txLoadedRows];
     try {
-      await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category });
-      // refresh category list in case a new category was entered
+      await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category, kind: tx.kind });
       loadCategories();
     } catch {
       tx.description = prevDesc;
       tx.category = prevCat;
+      tx.kind = prevKind;
       txLoadedRows = [...txLoadedRows];
     }
   }
@@ -1020,8 +1025,19 @@
                           />
                         </td>
                         <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
-                        <td class="num-col" class:tx-debit={tx.kind === "debit"} class:tx-credit={tx.kind === "credit"}>
-                          {tx.kind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                        <td class="num-col tx-kind-amt">
+                          <select
+                            class="tx-kind-select"
+                            bind:value={editKind}
+                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                          >
+                            <option value="debit">debit</option>
+                            <option value="credit">credit</option>
+                            <option value="transfer">transfer</option>
+                          </select>
+                          <span class:tx-debit={editKind === "debit"} class:tx-credit={editKind === "credit"}>
+                            {editKind === "debit" ? "−" : "+"}{fmt(tx.amount)}
+                          </span>
                         </td>
                       </tr>
                     {:else}
@@ -2022,6 +2038,31 @@
 
   @media (prefers-color-scheme: dark) {
     .tx-edit-input {
+      background: #1e1e1e;
+      border-color: #3a6aaa;
+      color: #f6f6f6;
+    }
+  }
+
+  .tx-kind-amt {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
+
+  .tx-kind-select {
+    font-size: 0.78rem;
+    font-family: inherit;
+    padding: 0.2em 0.3em;
+    border: 1px solid #99c0ff;
+    border-radius: 4px;
+    background: #fff;
+    color: inherit;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    .tx-kind-select {
       background: #1e1e1e;
       border-color: #3a6aaa;
       color: #f6f6f6;

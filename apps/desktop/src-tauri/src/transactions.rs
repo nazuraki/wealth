@@ -150,7 +150,10 @@ pub async fn get_transactions(
         .map_err(|e| e.to_string())
 }
 
-fn do_update_transaction(db_path: &Path, id: i64, description: String, category: String) -> Result<()> {
+fn do_update_transaction(db_path: &Path, id: i64, description: String, category: String, kind: String) -> Result<()> {
+    if !matches!(kind.as_str(), "debit" | "credit" | "transfer") {
+        anyhow::bail!("invalid transaction type: {kind}");
+    }
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -158,8 +161,8 @@ fn do_update_transaction(db_path: &Path, id: i64, description: String, category:
     db::run_migrations(&conn)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     conn.execute(
-        "UPDATE transactions SET description = ?1, category = ?2 WHERE id = ?3",
-        params![description, category, id],
+        "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+        params![description, category, kind, id],
     )?;
     Ok(())
 }
@@ -171,9 +174,10 @@ pub async fn update_transaction(
     id: i64,
     description: String,
     category: String,
+    kind: String,
 ) -> Result<(), String> {
     let path = db.0.clone();
-    tauri::async_runtime::spawn_blocking(move || do_update_transaction(&path, id, description, category))
+    tauri::async_runtime::spawn_blocking(move || do_update_transaction(&path, id, description, category, kind))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
@@ -424,11 +428,11 @@ mod tests {
         assert!(page.rows.is_empty());
     }
 
-    fn query_tx(conn: &Connection, id: i64) -> (String, String) {
+    fn query_tx(conn: &Connection, id: i64) -> (String, String, String) {
         conn.query_row(
-            "SELECT description, category FROM transactions WHERE id = ?1",
+            "SELECT description, category, type FROM transactions WHERE id = ?1",
             params![id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .unwrap()
     }
@@ -451,24 +455,41 @@ mod tests {
         let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Coffee", "Food", 5.0, "debit");
 
         conn.execute(
-            "UPDATE transactions SET description = ?1, category = ?2 WHERE id = ?3",
-            params!["Espresso", "Dining", tx_id],
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+            params!["Espresso", "Dining", "debit", tx_id],
         )
         .unwrap();
 
-        let (desc, cat) = query_tx(&conn, tx_id);
+        let (desc, cat, kind) = query_tx(&conn, tx_id);
         assert_eq!(desc, "Espresso");
         assert_eq!(cat, "Dining");
+        assert_eq!(kind, "debit");
+    }
+
+    #[test]
+    fn update_transaction_can_change_kind_to_transfer() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        let tx_id = seed_tx(&conn, stmt, "2025-01-10", "Wire", "Transfer", 500.0, "debit");
+
+        conn.execute(
+            "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+            params!["Wire", "Transfer", "transfer", tx_id],
+        )
+        .unwrap();
+
+        let (_, _, kind) = query_tx(&conn, tx_id);
+        assert_eq!(kind, "transfer");
     }
 
     #[test]
     fn update_transaction_nonexistent_id_is_no_op() {
         let conn = open_test_db();
-        // No rows — updating a nonexistent id should not error
         let affected = conn
             .execute(
-                "UPDATE transactions SET description = ?1, category = ?2 WHERE id = ?3",
-                params!["X", "Y", 9999i64],
+                "UPDATE transactions SET description = ?1, category = ?2, type = ?3 WHERE id = ?4",
+                params!["X", "Y", "debit", 9999i64],
             )
             .unwrap();
         assert_eq!(affected, 0);
