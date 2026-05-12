@@ -175,13 +175,9 @@
 
   $effect(() => {
     if (chartFrom && chartTo) {
-      console.log("[chart] fetching get_chart_data", { from: chartFrom, to: chartTo });
       invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
-        .then(data => {
-          console.log("[chart] got data, monthly_flows:", data?.monthly_flows?.length ?? "null");
-          chartData = data;
-        })
-        .catch((e) => { console.error("[chart] get_chart_data failed:", e); });
+        .then(data => { chartData = data; })
+        .catch(() => {});
     }
   });
 
@@ -285,7 +281,6 @@
         const prevTo = chartTo;
         chartTo = periods[periods.length - 1];
         chartFrom = periods.length >= 12 ? periods[periods.length - 12] : periods[0];
-        console.log("[dashboard] periods:", periods, "chartFrom:", chartFrom, "chartTo:", chartTo, "prevTo:", prevTo);
         if (chartTo === prevTo && chartFrom) {
           invoke<ChartData | null>("get_chart_data", { from: chartFrom, to: chartTo })
             .then(data => { chartData = data; })
@@ -316,20 +311,18 @@
     if (direction === "append") offset = txOffset + txLoadedRows.length;
     else if (direction === "prepend") offset = Math.max(0, txOffset - TX_PAGE_SIZE);
 
-    const filters = {
-      account_id: txFilterAccount ? Number(txFilterAccount) : null,
-      date_from: txFilterDateFrom || null,
-      date_to: txFilterDateTo || null,
-      category: txFilterCategory || null,
-      kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
-      offset,
-      limit: TX_PAGE_SIZE,
-    };
-    console.log("[tx] loadTxPage", direction, "myId:", myId, "filters:", JSON.stringify(filters));
-
     try {
-      const page = await invoke<TransactionPage>("get_transactions", { filters });
-      console.log("[tx] response myId:", myId, "txRequestId:", txRequestId, "total:", page.total, "rows:", page.rows.length);
+      const page = await invoke<TransactionPage>("get_transactions", {
+        filters: {
+          account_id: txFilterAccount ? Number(txFilterAccount) : null,
+          date_from: txFilterDateFrom || null,
+          date_to: txFilterDateTo || null,
+          category: txFilterCategory || null,
+          kinds: txFilterKinds.length > 0 ? [...txFilterKinds] : null,
+          offset,
+          limit: TX_PAGE_SIZE,
+        },
+      });
       if (myId !== txRequestId) return;
 
       txTotal = page.total;
