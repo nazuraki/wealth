@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
+  import SpendingView from "./SpendingView.svelte";
+  import type { Account } from "$lib/types";
   import {
     Chart,
     LineController,
@@ -92,17 +94,6 @@
     monthly_flows: MonthlyFlow[];
   }
 
-  interface Account {
-    id: number;
-    institution: string;
-    account_number_last4: string;
-    account_type: string | null;
-    display_name: string | null;
-    color: string | null;
-    closing_balance: number | null;
-    statement_period: string | null;
-  }
-
   type PageState =
     | "initializing"
     | "empty"
@@ -110,7 +101,7 @@
     | "importing"
     | "import-error";
 
-  type ActiveView = "dashboard" | "accounts" | "transactions" | "imports" | "settings";
+  type ActiveView = "dashboard" | "accounts" | "transactions" | "spending" | "imports" | "settings";
 
   interface AppSettings {
     api_key: string | null;
@@ -786,6 +777,7 @@
     { id: "dashboard", label: "Dashboard" },
     { id: "accounts", label: "Accounts" },
     { id: "transactions", label: "Transactions" },
+    { id: "spending", label: "Spending" },
     { id: "imports", label: "Import Log" },
     { id: "settings", label: "Settings" },
   ];
@@ -798,6 +790,7 @@
       resetAndLoadTransactions();
       loadCategories();
     }
+    if (id === "spending" && accounts.length === 0) loadAccounts();
   }
 </script>
 
@@ -846,6 +839,11 @@
             <circle cx="3" cy="6" r="1" fill="currentColor" stroke="none" />
             <circle cx="3" cy="12" r="1" fill="currentColor" stroke="none" />
             <circle cx="3" cy="18" r="1" fill="currentColor" stroke="none" />
+          </svg>
+        {:else if item.id === "spending"}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2a10 10 0 1 0 10 10" />
+            <path d="M12 2a10 10 0 0 1 10 10H12V2z" />
           </svg>
         {:else if item.id === "imports"}
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1206,6 +1204,8 @@
               </table>
             {/if}
           </section>
+        {:else if activeView === "spending"}
+          <SpendingView {accounts} />
         {:else if activeView === "imports"}
           <section class="recent-section" aria-label="Import log">
             <h2 class="section-title">Import Log</h2>
