@@ -1,4 +1,5 @@
 mod accounts;
+mod category_groups;
 mod chart;
 mod dashboard;
 mod importer;
@@ -41,6 +42,12 @@ pub fn run() {
             sql: db::MIGRATION_007,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 9,
+            description: "category groups",
+            sql: db::MIGRATION_009,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -64,6 +71,11 @@ pub fn run() {
             transactions::update_transaction,
             transactions::get_categories,
             spending::get_spending_by_category,
+            category_groups::list_category_groups,
+            category_groups::create_category_group,
+            category_groups::update_category_group,
+            category_groups::delete_category_group,
+            category_groups::set_category_group_members,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

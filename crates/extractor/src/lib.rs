@@ -192,6 +192,7 @@ Credits (deposits, refunds, payments received) are positive numbers with type 'c
 Infer a category for each transaction (e.g. Groceries, Dining, Travel, Utilities, Income, Transfer, Fee). \
 For account_type: use 'credit_card' for credit card statements, 'checking' for checking accounts, 'savings' for savings accounts, or null if unclear. \
 statement_period must be in YYYY-MM format using the statement end date (e.g. a statement ending May 27 2025 → '2025-05'). \
+Each transaction date must be in YYYY-MM-DD format. If the statement only prints MM/DD without a year (common on credit-card statements), infer the year from the statement_period: use the period year for transactions in the period month or earlier in the calendar year, and the prior year for transactions whose month is greater than the period month (e.g. statement_period 2026-01 with date 12/28 → 2025-12-28). \
 If a field cannot be determined from the text, use null for nullable fields or an empty string for strings.",
             "messages": [{
                 "role": "user",

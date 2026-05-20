@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, ToSql};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::{AppHandle, State};
@@ -9,69 +9,94 @@ pub struct SpendingFilters {
     pub date_from: String,
     pub date_to: String,
     pub account_id: Option<i64>,
+    /// "category" (default) or "group"
+    #[serde(default)]
+    pub group_by: Option<String>,
+    /// When set, restrict results to categories belonging to this group.
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct CategorySpend {
     pub category: String,
+    pub group_id: Option<i64>,
     pub total: f64,
     pub percentage: f64,
 }
 
 fn query_spending(conn: &Connection, filters: &SpendingFilters) -> Result<Vec<CategorySpend>> {
     let mut conditions = vec![
-        "t.date >= ?1".to_string(),
-        "t.date <= ?2".to_string(),
+        "t.date >= ?".to_string(),
+        "t.date <= ?".to_string(),
         "t.type = 'debit'".to_string(),
         "t.is_transfer = 0".to_string(),
+        "LOWER(COALESCE(t.category, '')) != 'transfer'".to_string(),
+    ];
+    let mut params_vec: Vec<Box<dyn ToSql>> = vec![
+        Box::new(filters.date_from.clone()),
+        Box::new(filters.date_to.clone()),
     ];
 
-    let account_id_param: Option<i64> = filters.account_id;
-    if account_id_param.is_some() {
-        conditions.push("a.id = ?3".to_string());
+    if let Some(acct_id) = filters.account_id {
+        conditions.push("a.id = ?".to_string());
+        params_vec.push(Box::new(acct_id));
+    }
+    if let Some(gid) = filters.group_id {
+        conditions.push(
+            "t.category IN (SELECT category FROM category_group_members WHERE group_id = ?)".to_string(),
+        );
+        params_vec.push(Box::new(gid));
     }
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let group_mode = filters.group_by.as_deref() == Some("group");
 
-    let sql = format!(
-        "SELECT t.category, SUM(t.amount) AS total \
-         FROM transactions t \
-         JOIN statements s ON t.statement_id = s.id \
-         JOIN accounts a ON s.account_id = a.id \
-         {where_clause} \
-         GROUP BY t.category \
-         ORDER BY total DESC"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-
-    let rows: Vec<(String, f64)> = if let Some(acct_id) = account_id_param {
-        stmt.query_map(
-            params![filters.date_from, filters.date_to, acct_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .filter_map(|r| r.ok())
-        .collect()
+    let sql = if group_mode {
+        format!(
+            "SELECT COALESCE(g.name, t.category) AS bucket, g.id AS group_id, SUM(t.amount) AS total \
+             FROM transactions t \
+             JOIN statements s ON t.statement_id = s.id \
+             JOIN accounts a ON s.account_id = a.id \
+             LEFT JOIN category_group_members m ON m.category = t.category \
+             LEFT JOIN category_groups g ON g.id = m.group_id \
+             {where_clause} \
+             GROUP BY bucket \
+             ORDER BY total DESC"
+        )
     } else {
-        stmt.query_map(
-            params![filters.date_from, filters.date_to],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )?
-        .filter_map(|r| r.ok())
-        .collect()
+        format!(
+            "SELECT t.category, NULL AS group_id, SUM(t.amount) AS total \
+             FROM transactions t \
+             JOIN statements s ON t.statement_id = s.id \
+             JOIN accounts a ON s.account_id = a.id \
+             {where_clause} \
+             GROUP BY t.category \
+             ORDER BY total DESC"
+        )
     };
 
-    let grand_total: f64 = rows.iter().map(|(_, t)| t).sum();
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let rows: Vec<(String, Option<i64>, f64)> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let grand_total: f64 = rows.iter().map(|(_, _, t)| t).sum();
 
     Ok(rows
         .into_iter()
-        .map(|(category, total)| CategorySpend {
+        .map(|(category, group_id, total)| CategorySpend {
             percentage: if grand_total > 0.0 {
                 (total / grand_total * 100.0 * 10.0).round() / 10.0
             } else {
                 0.0
             },
             category,
+            group_id,
             total,
         })
         .collect())
@@ -149,6 +174,8 @@ mod tests {
             date_from: "2025-01-01".to_string(),
             date_to: "2025-12-31".to_string(),
             account_id: None,
+            group_by: None,
+            group_id: None,
         }
     }
 
@@ -216,6 +243,20 @@ mod tests {
     }
 
     #[test]
+    fn excludes_transfer_category_name() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        seed_tx(&conn, stmt, "2025-01-10", "Dining", 50.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-11", "Transfer", 200.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-12", "transfer", 300.0, "debit", 0);
+
+        let rows = query_spending(&conn, &base_filters()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].category, "Dining");
+    }
+
+    #[test]
     fn date_range_filters_correctly() {
         let conn = open_test_db();
         let acct = seed_account(&conn, "Bank A", "1111");
@@ -227,7 +268,7 @@ mod tests {
         let filters = SpendingFilters {
             date_from: "2025-01-01".to_string(),
             date_to: "2025-01-31".to_string(),
-            account_id: None,
+            ..base_filters()
         };
         let rows = query_spending(&conn, &filters).unwrap();
         assert_eq!(rows.len(), 1);
@@ -262,11 +303,58 @@ mod tests {
         let filters = SpendingFilters {
             date_from: "2025-04-01".to_string(),
             date_to: "2025-07-31".to_string(),
-            account_id: None,
+            ..base_filters()
         };
         let rows = query_spending(&conn, &filters).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].category, "Gas");
+    }
+
+    #[test]
+    fn group_mode_aggregates_by_group() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        seed_tx(&conn, stmt, "2025-01-10", "Dining", 20.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-11", "Groceries", 80.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-12", "Gas", 50.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-13", "Shopping", 30.0, "debit", 0);
+
+        conn.execute("INSERT INTO category_groups (id, name) VALUES (1, 'Food')", []).unwrap();
+        conn.execute("INSERT INTO category_groups (id, name) VALUES (2, 'Transport')", []).unwrap();
+        conn.execute("INSERT INTO category_group_members (category, group_id) VALUES ('Dining', 1)", []).unwrap();
+        conn.execute("INSERT INTO category_group_members (category, group_id) VALUES ('Groceries', 1)", []).unwrap();
+        conn.execute("INSERT INTO category_group_members (category, group_id) VALUES ('Gas', 2)", []).unwrap();
+
+        let filters = SpendingFilters { group_by: Some("group".to_string()), ..base_filters() };
+        let rows = query_spending(&conn, &filters).unwrap();
+        assert_eq!(rows.len(), 3);
+        // Food = 100 (grouped), Transport = 50 (grouped), Shopping = 30 (ungrouped — shown by category)
+        let food = rows.iter().find(|r| r.category == "Food").unwrap();
+        assert_eq!(food.total, 100.0);
+        assert_eq!(food.group_id, Some(1));
+        let shopping = rows.iter().find(|r| r.category == "Shopping").unwrap();
+        assert_eq!(shopping.total, 30.0);
+        assert!(shopping.group_id.is_none());
+    }
+
+    #[test]
+    fn group_id_filter_drills_into_categories() {
+        let conn = open_test_db();
+        let acct = seed_account(&conn, "Bank A", "1111");
+        let stmt = seed_statement(&conn, acct, "2025-01");
+        seed_tx(&conn, stmt, "2025-01-10", "Dining", 20.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-11", "Groceries", 80.0, "debit", 0);
+        seed_tx(&conn, stmt, "2025-01-12", "Gas", 50.0, "debit", 0);
+
+        conn.execute("INSERT INTO category_groups (id, name) VALUES (1, 'Food')", []).unwrap();
+        conn.execute("INSERT INTO category_group_members (category, group_id) VALUES ('Dining', 1)", []).unwrap();
+        conn.execute("INSERT INTO category_group_members (category, group_id) VALUES ('Groceries', 1)", []).unwrap();
+
+        let filters = SpendingFilters { group_id: Some(1), ..base_filters() };
+        let rows = query_spending(&conn, &filters).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.category == "Dining" || r.category == "Groceries"));
     }
 
     #[test]

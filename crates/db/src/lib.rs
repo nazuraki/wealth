@@ -5,6 +5,8 @@ pub const MIGRATION_004: &str = include_str!("../migrations/004_dedupe_accounts.
 pub const MIGRATION_005: &str = include_str!("../migrations/005_account_display.sql");
 pub const MIGRATION_006: &str = include_str!("../migrations/006_transfer_type.sql");
 pub const MIGRATION_007: &str = include_str!("../migrations/007_is_transfer.sql");
+pub const MIGRATION_008: &str = include_str!("../migrations/008_normalize_tx_dates.sql");
+pub const MIGRATION_009: &str = include_str!("../migrations/009_category_groups.sql");
 
 /// Apply all migrations in order. Idempotent: safe to call on every connection open.
 pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -44,5 +46,10 @@ pub fn run_migrations(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     if !migration_007_applied {
         conn.execute_batch(MIGRATION_007)?;
     }
+    // Migration 008: backfill MM/DD transaction dates to YYYY-MM-DD. Idempotent
+    // — only matches rows that still look like MM/DD.
+    conn.execute_batch(MIGRATION_008)?;
+    // Migration 009: category groups + members. Idempotent (IF NOT EXISTS).
+    conn.execute_batch(MIGRATION_009)?;
     Ok(())
 }

@@ -45,6 +45,29 @@ fn is_transfer(description: &str) -> bool {
     TRANSFER_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Normalize a transaction date to YYYY-MM-DD. Extractors sometimes return
+/// MM/DD (e.g. for credit-card statements that print no year). We anchor the
+/// year to the statement_period (YYYY-MM): if the tx month is greater than
+/// the period month, the tx is in the prior calendar year.
+fn normalize_tx_date(date: &str, statement_period: &str) -> String {
+    let is_mm_dd = date.len() == 5
+        && date.as_bytes()[2] == b'/'
+        && date.as_bytes()[..2].iter().chain(&date.as_bytes()[3..]).all(|b| b.is_ascii_digit());
+    if !is_mm_dd { return date.to_string(); }
+    let period_year: i32 = match statement_period.get(..4).and_then(|s| s.parse().ok()) {
+        Some(y) => y,
+        None => return date.to_string(),
+    };
+    let period_month: u32 = match statement_period.get(5..7).and_then(|s| s.parse().ok()) {
+        Some(m) => m,
+        None => return date.to_string(),
+    };
+    let tx_month: u32 = date[..2].parse().unwrap_or(0);
+    let tx_day: u32 = date[3..].parse().unwrap_or(0);
+    let year = if tx_month <= period_month { period_year } else { period_year - 1 };
+    format!("{:04}-{:02}-{:02}", year, tx_month, tx_day)
+}
+
 // ── DB write (testable inner fn) ──────────────────────────────────────────────
 
 fn upsert_account(tx: &Transaction<'_>, extraction: &AccountExtraction) -> Result<i64> {
@@ -168,9 +191,10 @@ fn write_account_to_tx(
                 TransactionType::Credit => "credit",
                 _ => "debit",
             };
+            let normalized_date = normalize_tx_date(&t.date, &acct.statement_period);
             stmt.execute(params![
                 statement_id,
-                t.date,
+                normalized_date,
                 t.description,
                 t.category,
                 t.amount,
@@ -299,6 +323,24 @@ mod tests {
         assert!(is_transfer("ACH PAYMENT"));
         assert!(is_transfer("ONLINE PAYMENT"));
         assert!(is_transfer("ONLINE TRANSFER"));
+    }
+
+    #[test]
+    fn normalize_tx_date_passes_through_iso() {
+        assert_eq!(normalize_tx_date("2025-04-15", "2025-04"), "2025-04-15");
+        assert_eq!(normalize_tx_date("", "2025-04"), "");
+    }
+
+    #[test]
+    fn normalize_tx_date_anchors_same_year() {
+        assert_eq!(normalize_tx_date("04/15", "2025-04"), "2025-04-15");
+        assert_eq!(normalize_tx_date("03/02", "2025-04"), "2025-03-02");
+    }
+
+    #[test]
+    fn normalize_tx_date_wraps_to_prior_year() {
+        assert_eq!(normalize_tx_date("12/28", "2026-01"), "2025-12-28");
+        assert_eq!(normalize_tx_date("11/05", "2025-01"), "2024-11-05");
     }
 
     #[test]

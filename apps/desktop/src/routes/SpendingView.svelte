@@ -8,33 +8,67 @@
     Tooltip,
     Legend,
   } from "chart.js";
-  import type { Account } from "$lib/types";
+  import type { Account, CategoryGroup } from "$lib/types";
 
   Chart.register(DoughnutController, ArcElement, Tooltip, Legend);
 
   interface CategorySpend {
     category: string;
+    group_id: number | null;
     total: number;
     percentage: number;
   }
+
+  const ALL_GROUPS = "__all_groups__";
+  const ALL_CATEGORIES = "__all_categories__";
 
   type Period = "30d" | "90d" | "12m" | "custom";
   type SortCol = "category" | "total" | "percentage";
   type SortDir = "asc" | "desc";
 
-  let { accounts, active = true }: { accounts: Account[]; active?: boolean } = $props();
+  let {
+    accounts,
+    active = true,
+    dataVersion = 0,
+    onCategoryClick,
+  }: {
+    accounts: Account[];
+    active?: boolean;
+    dataVersion?: number;
+    onCategoryClick?: (args: {
+      category: string;
+      from: string;
+      to: string;
+      accountId: string;
+    }) => void;
+  } = $props();
 
   let period = $state<Period>("30d");
   let customFrom = $state("");
   let customTo = $state("");
   let accountId = $state("");
+  let groups = $state<CategoryGroup[]>([]);
+  let groupSelection = $state<string>(ALL_GROUPS);
   let rows = $state<CategorySpend[]>([]);
   let loading = $state(false);
   let sortCol = $state<SortCol>("total");
   let sortDir = $state<SortDir>("desc");
 
+  const groupBy = $derived(groupSelection === ALL_GROUPS ? "group" : "category");
+  const groupIdFilter = $derived(
+    groupSelection === ALL_GROUPS || groupSelection === ALL_CATEGORIES
+      ? null
+      : Number(groupSelection),
+  );
+  const selectedGroupName = $derived(
+    groupIdFilter == null
+      ? null
+      : (groups.find((g) => g.id === groupIdFilter)?.name ?? null),
+  );
+
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let chart: Chart<"doughnut"> | null = null;
+  let loadedVersion = 0;
 
   const COLORS = [
     "#396cd8", "#e05252", "#38a169", "#d69e2e", "#805ad5",
@@ -76,13 +110,38 @@
           date_from: from,
           date_to: to,
           account_id: accountId ? Number(accountId) : null,
+          group_by: groupBy,
+          group_id: groupIdFilter,
         },
       });
+      loadedVersion = dataVersion;
     } catch (e) {
       console.error("spending fetch failed", e);
       rows = [];
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadGroups() {
+    try {
+      groups = await invoke<CategoryGroup[]>("list_category_groups");
+    } catch (e) {
+      console.error("group fetch failed", e);
+      groups = [];
+    }
+  }
+
+  function handleRowClick(row: CategorySpend) {
+    // In group mode, a row with group_id drills into that group; an ungrouped row
+    // is just a raw category — navigate to Transactions like in category mode.
+    if (groupBy === "group" && row.group_id != null) {
+      groupSelection = String(row.group_id);
+      return;
+    }
+    if (onCategoryClick) {
+      const { from, to } = dateRange();
+      onCategoryClick({ category: row.category, from, to, accountId });
     }
   }
 
@@ -119,8 +178,19 @@
         options: {
           responsive: true,
           maintainAspectRatio: false,
+          onClick: (_evt, els) => {
+            const el = els[0];
+            if (el && rows[el.index]) handleRowClick(rows[el.index]);
+          },
           plugins: {
-            legend: { position: "right", labels: { boxWidth: 12, padding: 14, font: { size: 12 } } },
+            legend: {
+              position: "right",
+              labels: { boxWidth: 12, padding: 14, font: { size: 12 } },
+              onClick: (_evt, item) => {
+                const idx = item.index ?? -1;
+                if (idx >= 0 && rows[idx]) handleRowClick(rows[idx]);
+              },
+            },
             tooltip: {
               callbacks: {
                 label: (ctx) => {
@@ -138,8 +208,18 @@
 
   $effect(() => {
     // Re-run whenever filters change
-    const _ = period, __ = accountId, ___ = customFrom, ____ = customTo;
+    const _ = period,
+      __ = accountId,
+      ___ = customFrom,
+      ____ = customTo,
+      _____ = groupSelection;
     load();
+  });
+
+  $effect(() => {
+    // Refresh group list when transactions change so newly-added categories show up.
+    const _ = dataVersion;
+    loadGroups();
   });
 
   $effect(() => {
@@ -149,8 +229,12 @@
 
   $effect(() => {
     // When the view becomes visible again after being CSS-hidden, Chart.js needs
-    // to recalculate dimensions (it had zero size while display:none).
+    // to recalculate dimensions (it had zero size while display:none). Also
+    // refresh if transactions have been mutated since the last load.
     if (active) {
+      if (dataVersion !== loadedVersion) {
+        load();
+      }
       tick().then(() => chart?.resize());
     }
   });
@@ -222,8 +306,27 @@
           {/each}
         </select>
       {/if}
+
+      <select class="account-select" bind:value={groupSelection} aria-label="Group view">
+        <option value={ALL_GROUPS}>All groups</option>
+        <option value={ALL_CATEGORIES}>All categories</option>
+        {#if groups.length > 0}
+          <option disabled>──────</option>
+          {#each groups as g (g.id)}
+            <option value={String(g.id)}>{g.name}</option>
+          {/each}
+        {/if}
+      </select>
     </div>
   </div>
+
+  {#if selectedGroupName}
+    <div class="breadcrumb">
+      <button type="button" class="crumb-link" onclick={() => { groupSelection = ALL_GROUPS; }}>← All groups</button>
+      <span class="crumb-sep">/</span>
+      <span class="crumb-current">{selectedGroupName}</span>
+    </div>
+  {/if}
 
   {#if loading}
     <div class="spending-loading">
@@ -240,7 +343,7 @@
       <table class="spend-table">
         <thead>
           <tr>
-            <th class="col-cat" onclick={() => toggleSort("category")}>Category{sortIndicator("category")}</th>
+            <th class="col-cat" onclick={() => toggleSort("category")}>{groupBy === "group" ? "Group" : "Category"}{sortIndicator("category")}</th>
             <th class="col-num" onclick={() => toggleSort("total")}>Total{sortIndicator("total")}</th>
             <th class="col-pct" onclick={() => toggleSort("percentage")}>%{sortIndicator("percentage")}</th>
           </tr>
@@ -251,7 +354,11 @@
             <tr>
               <td class="col-cat">
                 <span class="cat-swatch" style="background:{color}"></span>
-                {row.category || "(uncategorized)"}
+                <button
+                  type="button"
+                  class="cat-link"
+                  onclick={() => handleRowClick(row)}
+                >{row.category || "(uncategorized)"}</button>
               </td>
               <td class="col-num">{fmt(row.total)}</td>
               <td class="col-pct">{row.percentage}%</td>
@@ -353,6 +460,34 @@
 
   .range-sep { font-size: 0.78rem; color: #aaa; }
 
+  .breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    color: #555;
+    margin-bottom: 0.75rem;
+  }
+
+  .crumb-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: #396cd8;
+    cursor: pointer;
+  }
+
+  .crumb-link:hover { text-decoration: underline; }
+
+  .crumb-sep { color: #aaa; }
+  .crumb-current { font-weight: 500; }
+
+  @media (prefers-color-scheme: dark) {
+    .breadcrumb { color: #aaa; }
+    .crumb-sep { color: #555; }
+  }
+
   .spending-loading {
     display: flex;
     justify-content: center;
@@ -419,6 +554,21 @@
   .col-pct { text-align: right; white-space: nowrap; color: #888; font-variant-numeric: tabular-nums; padding-left: 1rem; }
 
   .foot-label { color: #555; }
+
+  .cat-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .cat-link:hover {
+    color: #396cd8;
+    text-decoration: underline;
+  }
 
   .cat-swatch {
     display: inline-block;
