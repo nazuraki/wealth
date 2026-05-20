@@ -8,3 +8,11 @@ export interface Account {
   closing_balance: number | null;
   statement_period: string | null;
 }
+
+export interface CategoryGroup {
+  id: number;
+  name: string;
+  color: string | null;
+  sort_order: number;
+  categories: string[];
+}

@@ -3,7 +3,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
   import SpendingView from "./SpendingView.svelte";
-  import type { Account } from "$lib/types";
+  import type { Account, CategoryGroup } from "$lib/types";
   import {
     Chart,
     LineController,
@@ -170,6 +170,8 @@
   let txRequestId = 0;
 
   let editingTxId = $state<number | null>(null);
+  let editFocusField = $state<"desc" | "cat">("desc");
+  let txMutatedAt = $state(0);
   let editDesc = $state("");
   let editCat = $state("");
   let editKind = $state(""); // "debit" | "credit" | "debit-xfer" | "credit-xfer"
@@ -185,6 +187,13 @@
   let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
   let settingsSaved = $state(false);
   let settingsSaving = $state(false);
+
+  // ── Category Groups (Settings) ─────────────────────────────────────────────
+  let categoryGroups = $state<CategoryGroup[]>([]);
+  let groupEditOpenId = $state<number | null>(null);
+  let groupConfirmDeleteId = $state<number | null>(null);
+  let newGroupName = $state("");
+  let groupsSaving = $state(false);
 
   // ── Chart canvas / instance ───────────────────────────────────────────────────
 
@@ -400,8 +409,9 @@
     return { kind: xfer ? v.slice(0, -5) : v, isTransfer: xfer };
   }
 
-  function startEditTx(tx: Transaction) {
+  function startEditTx(tx: Transaction, focusField: "desc" | "cat" = "desc") {
     editingTxId = tx.id;
+    editFocusField = focusField;
     editDesc = tx.description;
     editCat = tx.category;
     editKind = kindToEditValue(tx.kind, tx.is_transfer);
@@ -425,6 +435,7 @@
     txLoadedRows = [...txLoadedRows];
     try {
       await invoke("update_transaction", { id: tx.id, description: tx.description, category: tx.category, kind: tx.kind, isTransfer: tx.is_transfer });
+      txMutatedAt = Date.now();
       loadCategories();
     } catch {
       tx.description = prevDesc;
@@ -470,6 +481,78 @@
       settingsForm = { apiKey: s.api_key ?? "", endpointUrl: s.endpoint_url ?? "" };
     } catch {
       // non-fatal
+    }
+  }
+
+  async function loadCategoryGroups() {
+    try {
+      categoryGroups = await invoke<CategoryGroup[]>("list_category_groups");
+    } catch (e) {
+      console.error("group fetch failed", e);
+    }
+  }
+
+  function groupOfCategory(cat: string): CategoryGroup | undefined {
+    return categoryGroups.find((g) => g.categories.includes(cat));
+  }
+
+  async function createGroup() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    groupsSaving = true;
+    try {
+      const id = await invoke<number>("create_category_group", { name, color: null });
+      newGroupName = "";
+      await loadCategoryGroups();
+      groupEditOpenId = id;
+    } catch (e) {
+      console.error("create group failed", e);
+      alert(`Failed to create group: ${e}`);
+    } finally {
+      groupsSaving = false;
+    }
+  }
+
+  async function renameGroup(g: CategoryGroup, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === g.name) return;
+    try {
+      await invoke("update_category_group", { id: g.id, name: trimmed, color: g.color });
+      await loadCategoryGroups();
+    } catch (e) {
+      console.error("rename failed", e);
+      alert(`Failed to rename: ${e}`);
+    }
+  }
+
+  async function deleteGroup(g: CategoryGroup) {
+    if (groupConfirmDeleteId !== g.id) {
+      groupConfirmDeleteId = g.id;
+      setTimeout(() => {
+        if (groupConfirmDeleteId === g.id) groupConfirmDeleteId = null;
+      }, 4000);
+      return;
+    }
+    groupConfirmDeleteId = null;
+    try {
+      await invoke("delete_category_group", { id: g.id });
+      if (groupEditOpenId === g.id) groupEditOpenId = null;
+      await loadCategoryGroups();
+    } catch (e) {
+      console.error("delete failed", e);
+      alert(`Failed to delete: ${e}`);
+    }
+  }
+
+  async function toggleCategoryInGroup(g: CategoryGroup, cat: string, checked: boolean) {
+    const current = new Set(g.categories);
+    if (checked) current.add(cat); else current.delete(cat);
+    try {
+      await invoke("set_category_group_members", { groupId: g.id, categories: Array.from(current) });
+      await loadCategoryGroups();
+    } catch (e) {
+      console.error("set members failed", e);
+      alert(`Failed to update assignment: ${e}`);
     }
   }
 
@@ -591,6 +674,7 @@
     const targetId = parseInt(mergeTargetId);
     try {
       await invoke("merge_accounts", { sourceId: mergeSourceId, targetId });
+      txMutatedAt = Date.now();
       accounts = await invoke<Account[]>("get_accounts");
       await loadDashboard();
       if (chartFrom && chartTo) {
@@ -640,6 +724,7 @@
         pageState = dashboard ? "dashboard" : "empty";
       } else {
         lastImport = response.summaries;
+        txMutatedAt = Date.now();
         await loadDashboard();
         importBanner = true;
         setTimeout(() => (importBanner = false), 4000);
@@ -667,6 +752,7 @@
     try {
       const response = await invoke<ImportResponse>("import_statement", { path, overwrite: true });
       lastImport = response.summaries;
+      txMutatedAt = Date.now();
       await loadDashboard();
       importBanner = true;
       setTimeout(() => (importBanner = false), 4000);
@@ -784,6 +870,7 @@
 
   function handleNavClick(id: ActiveView) {
     activeView = id;
+    if (contentEl) contentEl.scrollTop = 0;
     if (id === "accounts") loadAccounts();
     if (id === "transactions") {
       if (accounts.length === 0) loadAccounts();
@@ -791,6 +878,10 @@
       loadCategories();
     }
     if (id === "spending" && accounts.length === 0) loadAccounts();
+    if (id === "settings") {
+      loadCategoryGroups();
+      loadCategories();
+    }
   }
 </script>
 
@@ -1154,22 +1245,42 @@
                       <tr class="tx-editing" onfocusout={(e) => onEditRowFocusOut(tx, e)}>
                         <td class="tx-date">{tx.date}</td>
                         <td class="tx-desc">
-                          <input
-                            class="tx-edit-input"
-                            type="text"
-                            bind:value={editDesc}
-                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
-                            use:focusOnMount
-                          />
+                          {#if editFocusField === "cat"}
+                            <input
+                              class="tx-edit-input"
+                              type="text"
+                              bind:value={editDesc}
+                              onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                            />
+                          {:else}
+                            <input
+                              class="tx-edit-input"
+                              type="text"
+                              bind:value={editDesc}
+                              onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                              use:focusOnMount
+                            />
+                          {/if}
                         </td>
                         <td class="tx-cat">
-                          <input
-                            class="tx-edit-input tx-edit-cat"
-                            type="text"
-                            list="tx-categories-list"
-                            bind:value={editCat}
-                            onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
-                          />
+                          {#if editFocusField === "cat"}
+                            <input
+                              class="tx-edit-input tx-edit-cat"
+                              type="text"
+                              list="tx-categories-list"
+                              bind:value={editCat}
+                              onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                              use:focusOnMount
+                            />
+                          {:else}
+                            <input
+                              class="tx-edit-input tx-edit-cat"
+                              type="text"
+                              list="tx-categories-list"
+                              bind:value={editCat}
+                              onkeydown={(e) => { if (e.key === "Enter") commitEditTx(tx); if (e.key === "Escape") cancelEditTx(); }}
+                            />
+                          {/if}
                         </td>
                         <td class="tx-acct">{tx.institution} ···{tx.account_number_last4}</td>
                         <td class="num-col tx-kind-amt">
@@ -1189,7 +1300,14 @@
                         </td>
                       </tr>
                     {:else}
-                      <tr class="tx-row" onclick={() => startEditTx(tx)} title="Click to edit">
+                      <tr
+                        class="tx-row"
+                        onclick={(e) => {
+                          const cell = (e.target as HTMLElement).closest("td");
+                          startEditTx(tx, cell?.classList.contains("tx-cat") ? "cat" : "desc");
+                        }}
+                        title="Click to edit"
+                      >
                         <td class="tx-date">{tx.date}</td>
                         <td class="tx-desc">{tx.description}</td>
                         <td class="tx-cat">{tx.category}</td>
@@ -1237,7 +1355,21 @@
 
       <!-- SpendingView stays mounted to preserve filter state; CSS hides it when inactive -->
       <div class="view-panel" class:view-hidden={activeView !== "spending"}>
-        <SpendingView {accounts} active={activeView === "spending"} />
+        <SpendingView
+          {accounts}
+          active={activeView === "spending"}
+          dataVersion={txMutatedAt}
+          onCategoryClick={({ category, from, to, accountId }) => {
+            txFilterCategory = category;
+            txFilterDateFrom = from;
+            txFilterDateTo = to;
+            txFilterAccount = accountId;
+            txFilterKinds = ["debit"];
+            activeView = "transactions";
+            if (contentEl) contentEl.scrollTop = 0;
+            resetAndLoadTransactions();
+          }}
+        />
       </div>
     {/if}
 
@@ -1277,6 +1409,79 @@
             {/if}
           </div>
         </form>
+
+        <h3 class="subsection-title">Category Groups</h3>
+        <p class="field-hint" style="margin-top: -0.5rem;">
+          Group related categories so the Spending view can roll them up. Each category can belong to at most one group.
+        </p>
+
+        <div class="group-create">
+          <input
+            type="text"
+            class="field-input"
+            placeholder="New group name"
+            bind:value={newGroupName}
+            onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); createGroup(); } }}
+          />
+          <button type="button" onclick={createGroup} disabled={groupsSaving || !newGroupName.trim()}>
+            Add group
+          </button>
+        </div>
+
+        {#if categoryGroups.length === 0}
+          <p class="hint" style="margin-top: 0.75rem;">No groups yet.</p>
+        {:else}
+          <ul class="group-list">
+            {#each categoryGroups as g (g.id)}
+              <li class="group-item">
+                <div class="group-row">
+                  <input
+                    type="text"
+                    class="group-name-input"
+                    value={g.name}
+                    onblur={(e) => renameGroup(g, (e.currentTarget as HTMLInputElement).value)}
+                    onkeydown={(e) => {
+                      if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
+                    }}
+                  />
+                  <span class="group-count">{g.categories.length} {g.categories.length === 1 ? "category" : "categories"}</span>
+                  <button
+                    type="button"
+                    class="btn-link"
+                    onclick={() => { groupEditOpenId = groupEditOpenId === g.id ? null : g.id; }}
+                  >{groupEditOpenId === g.id ? "Done" : "Edit"}</button>
+                  <button type="button" class="btn-link btn-danger-link" onclick={() => deleteGroup(g)}>
+                    {groupConfirmDeleteId === g.id ? "Click again to confirm" : "Delete"}
+                  </button>
+                </div>
+                {#if groupEditOpenId === g.id}
+                  <div class="group-categories">
+                    {#if txCategories.length === 0}
+                      <p class="hint">No categories found yet — import a statement first.</p>
+                    {:else}
+                      {#each txCategories as cat (cat)}
+                        {@const owner = groupOfCategory(cat)}
+                        {@const inThis = owner?.id === g.id}
+                        {@const inOther = owner && owner.id !== g.id}
+                        <label class="cat-checkbox" class:in-other={inOther}>
+                          <input
+                            type="checkbox"
+                            checked={inThis}
+                            onchange={(e) => toggleCategoryInGroup(g, cat, (e.currentTarget as HTMLInputElement).checked)}
+                          />
+                          <span>{cat}</span>
+                          {#if inOther}
+                            <span class="cat-owner">(in {owner!.name})</span>
+                          {/if}
+                        </label>
+                      {/each}
+                    {/if}
+                  </div>
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </section>
     {/if}
   </main>
@@ -2247,6 +2452,105 @@
     font-size: 0.85rem;
     color: #38a169;
     font-weight: 500;
+  }
+
+  .subsection-title {
+    margin-top: 2rem;
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: #333;
+  }
+
+  .group-create {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-top: 0.75rem;
+  }
+
+  .group-create .field-input {
+    flex: 1;
+    max-width: 320px;
+  }
+
+  .group-list {
+    list-style: none;
+    padding: 0;
+    margin: 1rem 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .group-item {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #fff;
+  }
+
+  .group-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .group-name-input {
+    flex: 1;
+    font: inherit;
+    font-weight: 500;
+    border: none;
+    background: transparent;
+    outline: none;
+    padding: 0.2rem 0;
+    border-bottom: 1px solid transparent;
+  }
+  .group-name-input:focus { border-bottom-color: #396cd8; }
+
+  .group-count {
+    font-size: 0.78rem;
+    color: #888;
+    white-space: nowrap;
+  }
+
+  .btn-link {
+    background: none !important;
+    border: none !important;
+    padding: 0 !important;
+    font: inherit !important;
+    color: #396cd8 !important;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-link:hover { text-decoration: underline; }
+  .btn-danger-link { color: #e05252 !important; }
+
+  .group-categories {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.4rem 0.75rem;
+    padding: 0.5rem 0.75rem 0.75rem;
+    border-top: 1px solid #f0f0f0;
+  }
+
+  .cat-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .cat-checkbox.in-other { color: #888; }
+  .cat-owner { font-size: 0.72rem; color: #aaa; }
+
+  @media (prefers-color-scheme: dark) {
+    .subsection-title { color: #ddd; }
+    .group-item { background: #1a1a1a; border-color: #333; }
+    .group-name-input { color: #eee; }
+    .group-categories { border-top-color: #2a2a2a; }
+    .cat-checkbox.in-other { color: #666; }
+    .cat-owner { color: #555; }
   }
 
   /* ── Button ── */
