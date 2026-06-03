@@ -84,10 +84,18 @@ impl AnthropicClient {
     pub const DEFAULT_ENDPOINT: &'static str = "https://api.anthropic.com/v1/messages";
 
     pub fn with_config(api_key: String, base_url: String) -> Self {
+        // The blocking client defaults to a 30s timeout, but extracting a busy
+        // statement (many transactions → thousands of output tokens) routinely
+        // takes 35-60s. Give it generous headroom so long extractions don't fail
+        // with "operation timed out".
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("failed to build HTTP client");
         Self {
             api_key,
             base_url,
-            http: reqwest::blocking::Client::new(),
+            http,
         }
     }
 
@@ -181,7 +189,7 @@ impl ClaudeClient for AnthropicClient {
 
         let body = serde_json::json!({
             "model": "claude-opus-4-7",
-            "max_tokens": 8192,
+            "max_tokens": 16384,
             "output_config": {
                 "format": { "type": "json_schema", "schema": schema }
             },
