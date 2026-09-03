@@ -7,6 +7,7 @@ export interface Account {
   color: string | null;
   closing_balance: number | null;
   statement_period: string | null;
+  simplefin_id: string | null;
 }
 
 export interface CategoryGroup {

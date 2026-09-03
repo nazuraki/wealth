@@ -23,6 +23,14 @@ run: dev
 build:
     cd apps/desktop && npm run tauri build
 
+# Run the headless CLI (sync, export, accounts, map, rules)
+cli *ARGS:
+    cargo run -q -p wealth-cli -- {{ARGS}}
+
+# Pull new transactions from SimpleFIN into the app database
+sync:
+    cargo run -q -p wealth-cli -- sync
+
 # Run all checks (lint + typecheck + test)
 check: lint typecheck test
 

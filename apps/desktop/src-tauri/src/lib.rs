@@ -5,6 +5,7 @@ mod dashboard;
 mod importer;
 mod settings;
 mod spending;
+mod sync;
 mod transactions;
 
 use std::path::PathBuf;
@@ -48,6 +49,12 @@ pub fn run() {
             sql: db::MIGRATION_009,
             kind: MigrationKind::Up,
         },
+        Migration {
+            version: 10,
+            description: "simplefin sync columns and category rules",
+            sql: db::MIGRATION_010,
+            kind: MigrationKind::Up,
+        },
     ];
 
     tauri::Builder::default()
@@ -76,6 +83,10 @@ pub fn run() {
             category_groups::update_category_group,
             category_groups::delete_category_group,
             category_groups::set_category_group_members,
+            sync::sync_simplefin,
+            sync::map_simplefin_account,
+            sync::unmap_simplefin_account,
+            sync::resolve_simplefin_access,
         ])
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;

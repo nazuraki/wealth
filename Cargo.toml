@@ -4,5 +4,7 @@ members = [
     "crates/db",
     "crates/extractor",
     "crates/extractor-cli",
+    "crates/simplefin",
+    "crates/wealth-cli",
 ]
 resolver = "2"

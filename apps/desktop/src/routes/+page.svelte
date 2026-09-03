@@ -3,6 +3,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, tick, untrack } from "svelte";
   import SpendingView from "./SpendingView.svelte";
+  import SimpleFinSync from "./SimpleFinSync.svelte";
   import type { Account, CategoryGroup } from "$lib/types";
   import {
     Chart,
@@ -106,6 +107,7 @@
   interface AppSettings {
     api_key: string | null;
     endpoint_url: string | null;
+    simplefin_access_url: string | null;
   }
 
   interface Transaction {
@@ -184,8 +186,13 @@
     if (node instanceof HTMLInputElement) node.select();
   }
 
-  let settingsForm = $state<{ apiKey: string; endpointUrl: string }>({ apiKey: "", endpointUrl: "" });
+  let settingsForm = $state<{ apiKey: string; endpointUrl: string; simplefinAccessUrl: string }>({
+    apiKey: "",
+    endpointUrl: "",
+    simplefinAccessUrl: "",
+  });
   let settingsSaved = $state(false);
+  let settingsError = $state<string | null>(null);
   let settingsSaving = $state(false);
 
   // ── Category Groups (Settings) ─────────────────────────────────────────────
@@ -478,7 +485,11 @@
   async function loadSettings() {
     try {
       const s = await invoke<AppSettings>("get_settings");
-      settingsForm = { apiKey: s.api_key ?? "", endpointUrl: s.endpoint_url ?? "" };
+      settingsForm = {
+        apiKey: s.api_key ?? "",
+        endpointUrl: s.endpoint_url ?? "",
+        simplefinAccessUrl: s.simplefin_access_url ?? "",
+      };
     } catch {
       // non-fatal
     }
@@ -558,15 +569,24 @@
 
   async function saveSettings() {
     settingsSaving = true;
+    settingsError = null;
     try {
+      // A pasted SimpleFIN setup token is exchanged for its access URL once, here.
+      const accessUrl = await invoke<string>("resolve_simplefin_access", {
+        value: settingsForm.simplefinAccessUrl,
+      });
+      settingsForm.simplefinAccessUrl = accessUrl;
       await invoke("save_settings", {
         settings: {
           api_key: settingsForm.apiKey || null,
           endpoint_url: settingsForm.endpointUrl || null,
+          simplefin_access_url: accessUrl || null,
         },
       });
       settingsSaved = true;
       setTimeout(() => (settingsSaved = false), 2500);
+    } catch (e) {
+      settingsError = String(e);
     } finally {
       settingsSaving = false;
     }
@@ -878,6 +898,7 @@
       loadCategories();
     }
     if (id === "spending" && accounts.length === 0) loadAccounts();
+    if (id === "imports" && accounts.length === 0) loadAccounts();
     if (id === "settings") {
       loadCategoryGroups();
       loadCategories();
@@ -1323,6 +1344,15 @@
             {/if}
           </section>
         {:else if activeView === "imports"}
+          <SimpleFinSync
+            {accounts}
+            configured={settingsForm.simplefinAccessUrl !== ""}
+            onSynced={() => {
+              txMutatedAt = Date.now();
+              loadDashboard();
+            }}
+            onAccountsChanged={loadAccounts}
+          />
           <section class="recent-section" aria-label="Import log">
             <h2 class="section-title">Import Log</h2>
             {#if dashboard.recent_imports.length === 0}
@@ -1400,12 +1430,30 @@
             />
             <p class="field-hint">Leave blank to use the default Anthropic API endpoint.</p>
           </div>
+          <div class="field-group">
+            <label for="simplefin-access" class="field-label">SimpleFIN</label>
+            <input
+              id="simplefin-access"
+              type="password"
+              class="field-input"
+              placeholder="Setup token or access URL"
+              bind:value={settingsForm.simplefinAccessUrl}
+              autocomplete="off"
+            />
+            <p class="field-hint">
+              Paste the setup token from SimpleFIN Bridge; it is exchanged for an access URL when you save.
+              Syncing runs from the Import Log view or <code>wealth-cli sync</code>.
+            </p>
+          </div>
           <div class="settings-actions">
             <button type="submit" disabled={settingsSaving}>
               {settingsSaving ? "Saving…" : "Save"}
             </button>
             {#if settingsSaved}
               <span class="settings-saved">Saved</span>
+            {/if}
+            {#if settingsError}
+              <span class="settings-error" role="alert">{settingsError}</span>
             {/if}
           </div>
         </form>
@@ -2446,6 +2494,11 @@
     display: flex;
     align-items: center;
     gap: 1rem;
+  }
+
+  .settings-error {
+    color: #c0392b;
+    font-size: 0.9rem;
   }
 
   .settings-saved {

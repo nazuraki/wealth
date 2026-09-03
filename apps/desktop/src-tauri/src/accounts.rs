@@ -14,6 +14,7 @@ pub struct Account {
     pub color: Option<String>,
     pub closing_balance: Option<f64>,
     pub statement_period: Option<String>,
+    pub simplefin_id: Option<String>,
 }
 
 fn open_conn(db_path: &Path) -> Result<Connection> {
@@ -30,7 +31,7 @@ fn query_accounts(conn: &Connection) -> Result<Vec<Account>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.institution, a.account_number_last4, a.account_type, \
                 a.display_name, a.color, \
-                s.closing_balance, s.statement_period \
+                s.closing_balance, s.statement_period, a.simplefin_id \
          FROM accounts a \
          LEFT JOIN statements s ON s.account_id = a.id \
            AND s.imported_at = ( \
@@ -49,6 +50,7 @@ fn query_accounts(conn: &Connection) -> Result<Vec<Account>> {
                 color: r.get(5)?,
                 closing_balance: r.get(6)?,
                 statement_period: r.get(7)?,
+                simplefin_id: r.get(8)?,
             })
         })?
         .filter_map(|r| r.ok())
