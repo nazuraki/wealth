@@ -1,3 +1,9 @@
+mod anthropic;
+mod classify;
+
+pub use anthropic::AnthropicClient;
+pub use classify::is_transfer;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -58,6 +64,10 @@ pub struct ExtractionResult {
 
 pub trait ClaudeClient: Send + Sync {
     fn extract_from_statement(&self, text: &str, label: &str) -> Result<ExtractionResult>;
+
+    /// One category per description, in order. `known_categories` are the
+    /// categories already in use so the model reuses them where they fit.
+    fn categorize(&self, descriptions: &[String], known_categories: &[String]) -> Result<Vec<String>>;
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -70,174 +80,6 @@ pub fn extract_text(path: &Path) -> Result<String> {
 
 pub fn parse_line_items(text: &str, label: &str, client: &dyn ClaudeClient) -> Result<ExtractionResult> {
     client.extract_from_statement(text, label)
-}
-
-// ── Anthropic HTTP client ─────────────────────────────────────────────────────
-
-pub struct AnthropicClient {
-    api_key: String,
-    base_url: String,
-    http: reqwest::blocking::Client,
-}
-
-impl AnthropicClient {
-    pub const DEFAULT_ENDPOINT: &'static str = "https://api.anthropic.com/v1/messages";
-
-    pub fn with_config(api_key: String, base_url: String) -> Self {
-        // The blocking client defaults to a 30s timeout, but extracting a busy
-        // statement (many transactions → thousands of output tokens) routinely
-        // takes 35-60s. Give it generous headroom so long extractions don't fail
-        // with "operation timed out".
-        let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
-            .build()
-            .expect("failed to build HTTP client");
-        Self {
-            api_key,
-            base_url,
-            http,
-        }
-    }
-
-    pub fn new(api_key: String) -> Self {
-        Self::with_config(api_key, Self::DEFAULT_ENDPOINT.to_string())
-    }
-
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .map_err(|_| anyhow::anyhow!("ANTHROPIC_API_KEY not set"))?;
-        Ok(Self::new(api_key))
-    }
-}
-
-// Reusable sub-schemas.
-fn account_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "institution": { "type": "string" },
-            "account_number_last4": { "type": "string" },
-            "account_type": {
-                "anyOf": [
-                    { "type": "string", "enum": ["credit_card", "checking", "savings"] },
-                    { "type": "null" }
-                ]
-            },
-            "statement_period": { "type": "string", "pattern": "^\\d{4}-\\d{2}$" },
-            "opening_balance": { "type": ["number", "null"] },
-            "closing_balance": { "type": ["number", "null"] }
-        },
-        "required": ["institution", "account_number_last4", "account_type",
-                     "statement_period", "opening_balance", "closing_balance"],
-        "additionalProperties": false
-    })
-}
-
-fn transaction_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "date": { "type": "string" },
-                "description": { "type": "string" },
-                "category": { "type": "string" },
-                "amount": { "type": "number" },
-                "type": { "type": "string", "enum": ["debit", "credit"] }
-            },
-            "required": ["date", "description", "category", "amount", "type"],
-            "additionalProperties": false
-        }
-    })
-}
-
-fn summary_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "total_debits": { "type": "number" },
-            "total_credits": { "type": "number" },
-            "transaction_count": { "type": "integer" }
-        },
-        "required": ["total_debits", "total_credits", "transaction_count"],
-        "additionalProperties": false
-    })
-}
-
-impl ClaudeClient for AnthropicClient {
-    fn extract_from_statement(&self, text: &str, label: &str) -> Result<ExtractionResult> {
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": {
-                "accounts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "account": account_schema(),
-                            "transactions": transaction_schema(),
-                            "summary": summary_schema()
-                        },
-                        "required": ["account", "transactions", "summary"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["accounts"],
-            "additionalProperties": false
-        });
-
-        let body = serde_json::json!({
-            "model": "claude-opus-4-7",
-            "max_tokens": 16384,
-            "output_config": {
-                "format": { "type": "json_schema", "schema": schema }
-            },
-            "system": "You are a financial data extraction assistant. Extract structured transaction data from bank and credit card statements. \
-A single PDF may contain multiple accounts (e.g. a combined checking + savings statement) — return one entry per account in the accounts array. \
-For amounts: debits (purchases, payments, fees) are positive numbers with type 'debit'. \
-Credits (deposits, refunds, payments received) are positive numbers with type 'credit'. \
-Infer a category for each transaction (e.g. Groceries, Dining, Travel, Utilities, Income, Transfer, Fee). \
-For account_type: use 'credit_card' for credit card statements, 'checking' for checking accounts, 'savings' for savings accounts, or null if unclear. \
-statement_period must be in YYYY-MM format using the statement end date (e.g. a statement ending May 27 2025 → '2025-05'). \
-Each transaction date must be in YYYY-MM-DD format. If the statement only prints MM/DD without a year (common on credit-card statements), infer the year from the statement_period: use the period year for transactions in the period month or earlier in the calendar year, and the prior year for transactions whose month is greater than the period month (e.g. statement_period 2026-01 with date 12/28 → 2025-12-28). \
-If a field cannot be determined from the text, use null for nullable fields or an empty string for strings.",
-            "messages": [{
-                "role": "user",
-                "content": format!(
-                    "Extract all accounts and their transactions from this statement.\n\nLabel: {label}\n\n{text}"
-                )
-            }]
-        });
-
-        let resp = self
-            .http
-            .post(&self.base_url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
-            anyhow::bail!("Anthropic API error {status}: {body}");
-        }
-
-        let json: serde_json::Value = resp.json()?;
-        let text_block = json["content"]
-            .as_array()
-            .and_then(|arr| arr.iter().find(|b| b["type"] == "text"))
-            .and_then(|b| b["text"].as_str())
-            .ok_or_else(|| anyhow::anyhow!("No text block in Anthropic response"))?;
-
-        let result: ExtractionResult = serde_json::from_str(text_block)?;
-        if result.accounts.is_empty() {
-            anyhow::bail!("No accounts found in statement");
-        }
-        Ok(result)
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -329,6 +171,10 @@ mod tests {
         fn extract_from_statement(&self, text: &str, label: &str) -> Result<ExtractionResult> {
             *self.captured.lock().unwrap() = Some((text.to_string(), label.to_string()));
             Ok(self.fixture.clone())
+        }
+
+        fn categorize(&self, descriptions: &[String], _known: &[String]) -> Result<Vec<String>> {
+            Ok(descriptions.iter().map(|_| "Other".to_string()).collect())
         }
     }
 

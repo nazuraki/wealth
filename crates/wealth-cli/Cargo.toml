@@ -1,0 +1,16 @@
+[package]
+name = "wealth-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wealth-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+db = { path = "../db" }
+extractor = { path = "../extractor" }
+rusqlite = "0.32"
+serde_json = "1"
+simplefin = { path = "../simplefin" }

@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 extractor = { path = "../../../crates/extractor" }
 db = { path = "../../../crates/db" }
+simplefin = { path = "../../../crates/simplefin" }
 anyhow = "1"
 rusqlite = "0.32"
 

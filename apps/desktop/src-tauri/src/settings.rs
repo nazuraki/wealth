@@ -7,6 +7,7 @@ use tauri::{AppHandle, Manager};
 pub struct AppSettings {
     pub api_key: Option<String>,
     pub endpoint_url: Option<String>,
+    pub simplefin_access_url: Option<String>,
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
     pub window_width: Option<u32>,
@@ -38,10 +39,15 @@ pub fn get_settings(app: AppHandle) -> AppSettings {
     load(&data_dir)
 }
 
+/// Persist the user-editable fields, keeping window geometry the UI never sends.
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    save(&data_dir, &settings).map_err(|e| e.to_string())
+    let mut current = load(&data_dir);
+    current.api_key = settings.api_key;
+    current.endpoint_url = settings.endpoint_url;
+    current.simplefin_access_url = settings.simplefin_access_url;
+    save(&data_dir, &current).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -82,5 +88,19 @@ mod tests {
         let loaded = load(dir.path());
         assert_eq!(loaded.api_key.as_deref(), Some("key-only"));
         assert!(loaded.endpoint_url.is_none());
+        assert!(loaded.simplefin_access_url.is_none());
+    }
+
+    #[test]
+    fn simplefin_url_round_trips_and_old_files_still_load() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(settings_path(dir.path()), r#"{"api_key":"k","endpoint_url":null}"#).unwrap();
+        let loaded = load(dir.path());
+        assert_eq!(loaded.api_key.as_deref(), Some("k"));
+        assert!(loaded.simplefin_access_url.is_none());
+
+        let s = AppSettings { simplefin_access_url: Some("https://u:p@bridge.example/simplefin".into()), ..Default::default() };
+        save(dir.path(), &s).unwrap();
+        assert_eq!(load(dir.path()).simplefin_access_url.as_deref(), Some("https://u:p@bridge.example/simplefin"));
     }
 }
